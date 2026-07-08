@@ -1,0 +1,155 @@
+# Canonical config — see docs/SPEC.md §10.1
+# Live forbidden until config/edge_profile.toml has net_edge_bps > 0 (§9.0)
+
+[capital]
+initial_futures_deposit_usdt = 300.0
+initial_spot_deposit_usdt = 0.0
+risk_per_trade_pct = 0.01
+
+[deployment]
+mode = "start"
+observer_instance_type = "t3.micro"
+executor_instance_type = "t3.small"
+spot_enabled = false
+min_futures_pf_for_spot = 1.3
+start_futures_pairs = ["BTCUSDT", "ETHUSDT"]
+max_symbols = 35
+edge_profile_path = "config/edge_profile.toml"
+
+[resources]
+depth_enabled = false
+binance_ws_connections = 1
+zenoh_publish_hz_cap = 100
+observer_ram_soft_limit_mib = 400
+executor_ram_soft_limit_mib = 350
+log_tick_debug = false
+tokio_worker_threads = 2
+
+[lag]
+impulse_min_bps = 5.0
+lag_min_bps = 3.0
+follow_through_min = 0.40
+convergence_exit_ratio = 0.75
+time_stop_ms = 8000
+capture_est = 0.6
+bybit_mid_feed_hz = 50
+bybit_mid_max_staleness_ms = 200
+bybit_mid_feed_timeout_ms = 500
+
+[fees]
+spot_maker_pct = 0.001
+spot_taker_pct = 0.001
+futures_maker_pct = 0.0002
+futures_taker_pct = 0.00055
+fee_profit_buffer_pct = 0.0003
+
+[safe_mode]
+heartbeat_miss_caution = 1
+heartbeat_miss_defensive = 3
+heartbeat_miss_emergency = 5
+heartbeat_emergency_timeout_ms = 500
+
+[spot]
+spot_min_tp_pct = 0.008
+
+[execution]
+default_leverage_futures = 10
+max_leverage_futures = 20
+margin_mode = "isolated"
+slippage_limit_pct = 0.0005
+use_limit_fallback = true
+limit_fallback_timeout_ms = 50
+limit_offset_pct = 0.0001
+slippage_adaptive_resize = true
+
+[risk]
+max_daily_drawdown_spot = 0.02
+max_daily_drawdown_futures = 0.015
+correlation_limit_btc_eth = 0.6
+correlation_limit_eth_when_btc_open = 0.3
+atr_multiplier_stop = 1.8
+atr_min_filter = 0.002
+
+[take_profit]
+enabled = true
+initial_target_pct = 0.005
+partial_close_pct = 0.5
+trail_arm_pct = 0.003
+sl_breakeven_pct = 0.003
+sl_tighten_pct = 0.0015
+base_tp_trail_atr = 1.0
+extended_trend_tp = true
+extended_trend_z_min = 2.0
+
+[signals]
+z_score_entry = 2.5
+z_score_exit = 0.5
+velocity_min = 0.0001
+
+[noise_filter]
+min_trade_volume_usd = 10000.0
+max_spread_pct = 0.0001
+volatility_stddev_threshold = 0.0005
+
+[network]
+max_latency_ms = 150
+heartbeat_interval_ms = 100
+heartbeat_timeout_ms = 500
+safe_mode_latency_p95_ms = 150
+packet_version = 3
+seq_gap_pause_threshold = 10
+seq_gap_pause_duration_sec = 5
+
+[adaptive_strategy]
+use_dynamic_thresholds = true
+threshold_window_ticks = 5000
+threshold_percentile = 0.95
+threshold_multiplier = 1.1
+threshold_min = 1.8
+threshold_max = 3.2
+
+[regime_filter]
+mode = "auto"
+trend_strength_threshold = 2.0
+range_strength_threshold = 1.2
+
+[funding_basis]
+enabled = true
+max_funding_rate = 0.0001
+basis_threshold_pct = 0.0005
+ticker_poll_interval_sec = 60
+
+[spot_failsafe]
+spot_exchange_stop = true
+sl_exchange_buffer_pct = 0.001
+stop_amend_debounce_ms = 1000
+
+[replay]
+log_version = "v1"
+log_rotation_mb = 100
+log_rotation_hours = 1
+min_replay_pf_for_live = 1.2
+
+[alerts]
+telegram_bot_token = "${TELEGRAM_BOT_TOKEN}"
+telegram_chat_id = "${TELEGRAM_CHAT_ID}"
+prometheus_endpoint = "/metrics"
+
+[control_panel]
+enabled = true
+bind_addr = "127.0.0.1:8080"
+auth_mode = "jwt"
+jwt_secret_env = "PANEL_JWT_SECRET"
+default_spot_alloc_pct = 0.05
+default_futures_alloc_pct = 0.05
+max_pair_alloc_pct = 0.25
+ws_push_interval_ms = 2000
+audit_log_path = "/var/log/bot/panel_audit.jsonl"
+
+[whitelist]
+pairs = [
+  "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+  "AVAXUSDT", "LINKUSDT", "ADAUSDT", "POLUSDT", "DOTUSDT", "ARBUSDT",
+  "OPUSDT", "NEARUSDT", "PEPEUSDT", "WIFUSDT", "FETUSDT", "RENDERUSDT",
+  "ENAUSDT", "SUIUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "WLDUSDT", "NOTUSDT",
+]

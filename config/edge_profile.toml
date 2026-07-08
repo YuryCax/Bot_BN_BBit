@@ -1,0 +1,33 @@
+# OUTPUT OF §9.0 EDGE RESEARCH — DO NOT USE FOR LIVE WITH PLACEHOLDER VALUES
+#
+# Replace placeholders with measured values from research/edge_report/
+# Go/no-go: at least 1 symbol with net_edge_bps > 0 in >= 3 hourly windows
+#
+# Generate via: research/collector → analysis notebook → this file
+
+[meta]
+generated_at = "PLACEHOLDER"
+research_period_days = 0
+injected_latency_ms = 150
+status = "pending"  # pending | pass | fail
+
+[edge.BTCUSDT]
+net_edge_bps = 0.0              # MUST be > 0 for live
+follow_through_min = 0.42       # from measured data, not guess
+lag_min_bps = 3.0
+trade_hours_utc = []            # e.g. [13, 14, 15, 16, 17, 18, 19, 20]
+vol_regime_min_atr_pct = 0.0025
+
+[edge.ETHUSDT]
+net_edge_bps = 0.0
+follow_through_min = 0.42
+lag_min_bps = 3.0
+trade_hours_utc = []
+vol_regime_min_atr_pct = 0.0025
+
+# [edge.SOLUSDT]
+# net_edge_bps = 0.0
+# follow_through_min = 0.40
+# lag_min_bps = 3.5
+# trade_hours_utc = []
+# vol_regime_min_atr_pct = 0.0030

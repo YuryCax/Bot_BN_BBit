@@ -1,0 +1,35 @@
+# Secrets
+.env
+*.pem
+*.key
+credentials.json
+
+# Edge research raw data (large)
+research/data/
+*.parquet
+
+# Logs & replay
+*.bin
+/var/log/bot/
+
+# Rust (future)
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Python (Edge Research / Analyst)
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local overrides (never commit production configs with keys)
+config/config.local.toml
+config/secrets.toml
