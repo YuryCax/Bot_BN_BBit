@@ -1,0 +1,13 @@
+[Unit]
+Description=Analyst Service (Phase 2)
+After=network.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/bot/analyst
+ExecStart=/usr/bin/python3 analyst.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

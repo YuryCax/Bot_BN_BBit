@@ -1,0 +1,14 @@
+[package]
+name = "replay"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "replay"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared" }
+executor-core = { path = "../executor-core" }
+postcard = { workspace = true }
+anyhow = { workspace = true }

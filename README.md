@@ -2,56 +2,59 @@
 
 Low-latency cross-exchange lead-lag trading: **Binance Futures (signal) → Bybit Perpetual (execution)**.
 
-**Primary goal:** positive **net edge** after fees — not observation, not LLM hype.
-
-## Status
-
-| Phase | State |
-|-------|-------|
-| **0 — Edge Research** | **Start here** — `research/` |
-| **1 — Rust bot + Panel** | Not started |
-| **2 — Analyst + DB** | Not started |
-| **3 — Validated Analyst** | Not started |
-
-## Quick Start
-
-1. Read the spec: [`бот на Rust4.md`](бот%20на%20Rust4.md) (v2.3)
-2. Run §9.0 Edge Research → fill `config/edge_profile.toml`
-3. Only then scaffold Rust workspace (§2.7.3)
-
-## Configuration
-
-| File | Purpose |
-|------|---------|
-| [`config/config.toml`](config/config.toml) | Main bot config (`packet_version = 3`) |
-| [`config/symbols.toml`](config/symbols.toml) | MVP futures pairs (BTC, ETH) |
-| [`config/edge_profile.toml`](config/edge_profile.toml) | **Required for live** — from Edge Research |
-
-Copy [`.env.example`](.env.example) → `.env` for secrets (never commit).
-
-## Architecture (summary)
+## Project structure
 
 ```
-Binance WS → Observer (Tokyo) → Entry Engine + lag gates
-                    ↓ Zenoh UDP
-              Executor (Singapore) → Risk → Bybit
-                    ↑ bybit_mid feed (50 Hz)
+config/           # config.toml, symbols.toml, edge_profile.toml, analyst.toml
+crates/
+  shared/         # MarketStatePacket, config, validation, zenoh IPC
+  observer-core/  # Binance WS, Entry Engine, lag §3.5
+  executor-core/  # Risk, Position Manager, Bybit signing
+  observer-bin/   # observer service
+  executor-bin/   # executor service
+  panel/          # Control Panel REST API §8.5
+  replay/         # Replay engine §9.1
+  telegram-alerts/
+research/         # Phase 0 Edge Research
+analyst/          # Phase 2 offline advisor
+book-collector/   # Phase 2 TimescaleDB
+deploy/           # systemd + docker-compose
 ```
 
-See ADRs: [`docs/adr/`](docs/adr/)
+## Build (requires Rust 1.78+)
 
-## Infrastructure (paper/live)
+```bash
+cargo build --release
+cargo test --all
+```
 
-- **Tokyo** `t3.micro` — Observer
-- **Singapore** `t3.small` — Executor + Panel + Telegram
+Binaries: `target/release/observer`, `executor`, `control-panel`, `replay`, `telegram-alerts`
 
-## Hard Rules
+## Phase 0 — Edge Research
 
-- No live without §9.0 pass (`net_edge_bps > 0`)
-- No LLM in hot path
-- Observer decides entry; Executor does not recalculate Z/D_exp/lag
-- Stale `bybit_mid` → no entry (fail-closed)
+```bash
+pip install -r research/collector/requirements.txt
+python research/collector/collector.py --duration-sec 3600
+python research/edge_report/analyze.py
+```
 
-## License
+## Run (mono-node dev)
 
-Private — trading system. Do not commit API keys.
+```bash
+export BOT_CONFIG=config/config.toml
+export BOT_SYMBOLS=config/symbols.toml
+cargo run -p observer-bin
+cargo run -p executor-bin
+cargo run -p panel
+```
+
+## Deploy
+
+- Dual-node: `deploy/systemd/` on t3.micro Tokyo + t3.small Singapore
+- TimescaleDB: `docker compose -f deploy/docker-compose.yml up -d`
+
+## Gates
+
+- **Live:** `config/edge_profile.toml` → `meta.status = "pass"`
+- **Paper:** replay PF ≥ 1.2, follow-through ≥ 40%
+- **Phase 3:** `analyst/phase3/shadow.py` → pf_shadow > pf_actual

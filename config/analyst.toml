@@ -1,0 +1,20 @@
+[analyst]
+enabled = true
+forecast_interval_min = 15
+daily_report_utc = "00:30"
+suggestion_ttl_hours = 24
+max_applies_per_hour = 10
+llm_timeout_sec = 60
+
+[phase3]
+auto_apply_level = 0          # 0=off, 1=low_risk, 2=tuning, 3=full_assist, 4=manual_entry
+path = "B"                    # A=integrate primary | B=separate Bybit account (recommended)
+shadow_days_required = 30
+kill_switch = false
+require_replay_on_config = true
+
+[phase3.auto_apply_whitelist]
+level_1 = ["trading_window", "halt_wallet", "pair_disable"]
+level_2 = ["config_patch", "pair_alloc"]
+level_3 = ["close_position"]
+level_4 = ["manual_entry"]

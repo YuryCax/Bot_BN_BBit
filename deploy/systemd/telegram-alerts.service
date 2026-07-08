@@ -1,0 +1,13 @@
+[Unit]
+Description=Bot Telegram Alerts
+After=network.target
+
+[Service]
+Type=simple
+User=bot
+EnvironmentFile=/etc/bot/.env
+ExecStart=/opt/bot/bin/telegram-alerts
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

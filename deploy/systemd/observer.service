@@ -1,0 +1,16 @@
+[Unit]
+Description=Bot Observer (Tokyo)
+After=network.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/bot
+Environment=BOT_CONFIG=/etc/bot/config.toml
+Environment=BOT_SYMBOLS=/etc/bot/symbols.toml
+ExecStart=/opt/bot/bin/observer
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

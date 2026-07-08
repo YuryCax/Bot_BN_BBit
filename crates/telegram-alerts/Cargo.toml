@@ -1,0 +1,15 @@
+[package]
+name = "telegram-alerts"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "telegram-alerts"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

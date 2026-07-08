@@ -1,0 +1,19 @@
+[package]
+name = "observer-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+shared = { path = "../shared" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+simd-json = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+crossbeam-queue = { workspace = true }
+postcard = { workspace = true }
+anyhow = { workspace = true }
+serde_json = "1"
+
+[dev-dependencies]
+proptest = { workspace = true }

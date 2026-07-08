@@ -1,0 +1,14 @@
+[Unit]
+Description=Bot Control Panel
+After=network.target executor.service
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/bot
+Environment=BOT_CONFIG=/etc/bot/config.toml
+ExecStart=/opt/bot/bin/control-panel
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Order Book Collector (Phase 2)
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/bot/book-collector
+ExecStart=/usr/bin/python3 collector.py --dsn postgresql://bot:bot@localhost:5432/bot
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
