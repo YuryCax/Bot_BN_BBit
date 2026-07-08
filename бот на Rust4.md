@@ -1,11 +1,13 @@
 # 📘 ТЕХНИЧЕСКОЕ ЗАДАНИЕ (ТЗ)
 ## Low-Latency Алготрейдинговая Система: Binance Futures → Bybit Spot/Perpetual
-**Версия:** 1.6  
+**Версия:** 1.8  
 **Дата:** 08.07.2026  
 **Язык разработки:** Rust 1.78+  
 **Среда исполнения:** Linux (Ubuntu 22.04/24.04 LTS), `x86_64`/`aarch64`  
-**Архитектура:** Распределённая двухузловая (`Observer` → `Executor`) или **MVP mono-node** (§2.4)  
+**Архитектура:** Trading bot — Rust (`Observer` → `Executor`); **Analyst** — отдельный сервис (§8.6); MVP mono-node (§2.4).
 
+> **Changelog v1.8:** дорожная карта **Фаза 1 / Фаза 2** (§10.6); §8.6.9 **Proposal & Apply** (Telegram/Panel, one-click); §8.7 **Order Book DB** для паттернов; Analyst — фаза 2.  
+> **Changelog v1.7:** §8.6 сервис **`analyst`** — offline ИИ-аналитик (не трейдер): наблюдение MA, прогноз направления, отчёты; §9.1 go/no-go; trade journal export.  
 > **Changelog v1.6:** исправлен `D_min_net` (fees без ×Lev); §5.5 единый `effective_SL`; fee-BE унифицирован; `MICRO_OK` по Bybit; Safe-Mode поэтапный; cancel-all → auto re-place exchange stop; replay с delay 150 ms; MVP mono-node; futures-first для spot.  
 > **Changelog v1.5:** цель «рост депозита, не слив»; §5.4 адаптивное SL/TP по метрикам Binance; §6.0 раздельные депозиты Spot/Futures; §6.3 fee-aware sizing (вход/TP с учётом комиссий); §8.5.9 раздельная остановка торговли и снятие ордеров Spot/Futures.  
 > **Changelog v1.4:** добавлена §8.5 «Панель управления» — веб-UI для распределения капитала по парам (% от депозита), включения/остановки пар, отображения профита (realized/unrealized, по паре и суммарно).  
@@ -23,10 +25,11 @@
 | **Главная цель** | **Рост депозита, а не его слив.** Бот входит только когда ожидаемая прибыль **после комиссий** (§6.3) положительна; в открытой позиции **поднимает SL и TP** по метрикам Binance (§5.4), фиксируя прибыль и защищая капитал. Сделки «в ноль минус комиссия» запрещены. |
 | **Приоритет рынков** | **Futures-first:** основной edge из‑за меньших комиссий и Long/Short. Spot — **фаза 2**, только после paper PF ≥ 1.3 на futures (§6.0, §9.1). |
 | **Принцип разделения** | `Observer` (Токио) = сбор данных, фильтрация шума, расчёт метрик, **полная оценка условий входа §7**, генерация `MarketStatePacket` с `entry_valid` + `direction_bias`.<br>`Executor` (Сингапур) = freshness/dedup, **Risk Engine (только фильтры исполнения)**, маршрутизация Spot/Futures, исполнение, ведение позиции, **локальный EMA для exit-триггеров**, управление капиталом.<br>**Дублирование entry-логики (Z, D_exp, D_min) на Executor запрещено.** |
-| **Технологический стек** | Rust, `tokio`, `simd-json`, `zenoh`, `postcard`, `crossbeam`, `tracing`, `prometheus`, `rustls`, `teloxide` (только на Executor / отдельном сервисе алертов), **Control Panel** (§8.5): `axum` + REST/WebSocket API, статический SPA (React/Vue) или server-rendered UI. |
+| **Технологический стек** | **Trading (Rust):** `tokio`, `simd-json`, `zenoh`, `postcard`, `crossbeam`, `tracing`, `prometheus`, `rustls`, `teloxide`, Control Panel (`axum`).<br>**Analyst (§8.6, отдельный сервис):** Python 3.11+ / TypeScript, LLM API (OpenAI / Anthropic / local), `pandas`, cron/systemd. **Analyst не входит в Rust binary.** |
 | **Инфраструктура** | **Production:** AWS `ap-northeast-1` (Observer) + `ap-southeast-1` (Executor), VPC Peering.<br>**MVP (§2.4):** один сервер `ap-southeast-1`, in-process Observer+Executor — до подтверждения PF на paper. |
 | **Допустимые инструменты** | Whitelist: 20–35 пар. Стартовый набор — `config.toml` / `symbols.toml`. **Добавление и остановка пар в runtime** — только через Панель управления (§8.5) с hot-reload; произвольная подписка без оператора запрещена. |
-| **Ключевые ограничения** | One-way latency Токио→Сингапур P95 ≤ 80 мс, P99 ≤ 110 мс. Freshness drop > 150 мс. Hot path Risk Engine ≤ 10 мкс (§4.2). Проскальзывание входа ≤ 0.05%. Максимальный дневной DD: Spot ≤ 2%, Futures ≤ 1.5%. |
+| **Ключевые ограничения** | One-way latency Токио→Сингапур P95 ≤ 80 мс, P99 ≤ 110 мс. Freshness drop > 150 ms. Hot path Risk Engine ≤ 10 мкс (§4.2). Проскальзывание входа ≤ 0.05%. Максимальный дневной DD: Spot ≤ 2%, Futures ≤ 1.5%. |
+| **Этапы разработки** | **Фаза 1:** боты + Panel (§10.6). **Фаза 2:** БД стаканов + Analyst + Apply с телефона (§8.6–8.7). Фаза 2 **не блокирует** запуск торговли. |
 
 ### 1.1. Архитектурная схема
 
@@ -705,8 +708,11 @@ POST /api/v1/positions/{id}/close
 POST /api/v1/trading/halt                 → { wallet: "spot"|"futures"|"all", halt_entries: true }
 POST /api/v1/trading/resume               → { wallet: "spot"|"futures"|"all" }
 POST /api/v1/orders/cancel-all            → { wallet: "spot"|"futures" }  # снять все открытые ордера
-POST /api/v1/positions/close-all          → { wallet: "spot"|"futures", confirm: true }  # опционально
-WS   /ws/v1/stream
+POST /api/v1/positions/close-all          → { wallet: "spot"|"futures", confirm: true }
+GET  /api/v1/suggestions?status=pending   → pending Analyst proposals (Фаза 2)
+POST /api/v1/suggestions/{id}/apply       → one-click apply
+POST /api/v1/suggestions/{id}/reject
+WS   /ws/v1/stream                        → + push «N pending suggestions»
 ```
 
 #### 8.5.6. Конфигурация
@@ -771,6 +777,247 @@ Telegram — мобильные алерты; панель — основной 
 
 **UI:** две кнопки на каждый кошелёк — «⏸ Stop new bets» и «✕ Cancel all orders»; статус `HALTED` / `ACTIVE` в dashboard.
 
+### 8.6. Analyst Service — ИИ-аналитик (отдельный сервис, **Фаза 2**, не трейдер)
+
+Сервис **`analyst`** — автономный процесс в **Фазе 2** (§10.6). Наблюдает MA, стаканы (§8.7), паттерны; формирует **предложения** (настройки, allocation, ручные ставки). **Исполнение — только после Apply оператором** (§8.6.4), в т.ч. с телефона через Telegram.
+
+> **Analyst не автоторгует.** Нет Apply — нет изменений. Hot path бота Analyst **не трогает**.
+
+#### 8.6.1. Архитектура (Фаза 2)
+
+```
+[ Trading Bot — Фаза 1 ]          [ Analyst — Фаза 2 ]           [ Operator (mobile/PC) ]
+ Observer + Executor + Panel            │                              │
+      │                                  │                              │
+      ├── .bin + trades DB ─────────────►│ MA + orderbook patterns      │
+      ├── Panel command queue ◄──────────│ SuggestionQueue              │
+      │                                  │ LLM forecast                 ├──► Telegram 🔔
+      └── POST /suggestions/{id}/apply ◄─┤ Proposal builder             │    [Apply][Reject]
+                                         └── TimescaleDB §8.7           └──► Panel «Pending»
+```
+
+| Параметр | Спецификация |
+|----------|--------------|
+| **Deploy** | `analyst.service`; **стартует после** ≥ 14 дней сбора данных Фазы 1 |
+| **Runtime** | Python 3.11+ (рекомендуется) |
+| **Расписание** | Forecast каждые 15 min; daily report 00:30 UTC; scan pending → push оператору |
+| **LLM** | OpenAI / Anthropic / Ollama; timeout 60 s → rule-based fallback |
+
+#### 8.6.2. Наблюдение за MA (Moving Averages)
+
+Analyst строит и отслеживает MA **независимо** от торгового бота:
+
+| MA | Источник | Назначение |
+|----|----------|------------|
+| **EMA(50), EMA(200), EMA(500)** Binance | `.bin` PACKET; EMA(500) — из TICK или REST klines | Тренд сигнального рынка (§3.3) |
+| **EMA(50), EMA(200)** Bybit | `.bin` + пересчёт из Bybit mid | Тренд рынка исполнения |
+| **SMA(20), SMA(50)** (опц.) | REST klines 5m Binance + Bybit | Краткосрочный контекст |
+| **Cross state** | `EMA50 vs EMA200` на обеих биржах | Golden/Death cross; расхождение Binance↔Bybit |
+
+**Rule-based MA (детерминированно, до LLM):**
+```
+ma_bias = +1  если EMA50 > EMA200  и  price > EMA50   (uptrend)
+ma_bias = −1  если EMA50 < EMA200  и  price < EMA50   (downtrend)
+ma_bias =  0  иначе                                    (range/chop)
+
+ma_spread_pct = (EMA50 − EMA200) / price
+ma_divergence = sign(ma_bias_binance) ≠ sign(ma_bias_bybit)  → alert
+```
+
+#### 8.6.3. Прогноз направления (LLM + MA)
+
+Прогноз на горizont `forecast_horizon_min` (default 30 min) — **не ордер**, а оценка:
+
+**Вход LLM (JSON):** symbol, ts, binance `{price, ema50, ema200, z, vel, regime}`, bybit `{mid, ema50, ema200}`, `ma_bias_*`, `bot_last_signal`, `recent_trades_net_pnl_pct`.
+
+**Выход (обязательная схема):**
+```json
+{
+  "direction_forecast": "up" | "down" | "neutral",
+  "confidence": 0.0,
+  "horizon_min": 30,
+  "ma_summary": "EMA50>EMA200 на обеих биржах",
+  "divergence_vs_bot": "aligned" | "contradicts" | "no_bot_signal",
+  "risk_note": "",
+  "suggestions": []
+}
+```
+
+**Constraints:** `confidence < 0.55` → `neutral`; forecast ≠ bot → alert.
+
+#### 8.6.4. Proposal & Apply — one-click применение (оператор не at desk)
+
+Analyst создаёт **формализованные предложения** (`Suggestion`), оператор **одной кнопкой** отправляет их в Panel → Executor command queue.
+
+**Типы предложений (`SuggestionKind`):**
+
+| Kind | Что предлагает | После Apply |
+|------|----------------|-------------|
+| `config_patch` | `{ "signals.z_score_entry": 2.8 }` | hot-reload config |
+| `pair_alloc` | `{ symbol, futures_alloc_pct: 0.12 }` | §8.5.2 |
+| `pair_enable` / `pair_disable` | вкл/выкл пару | §8.5.3 |
+| `manual_entry` | `{ symbol, direction, instrument, size_pct }` | Risk Engine → open (§4.2) |
+| `close_position` | `{ position_id, reason }` | Market close |
+| `halt_wallet` | `{ wallet: "spot"\|"futures", halt: true }` | §8.5.9 |
+
+**Жизненный цикл:**
+```
+Analyst → POST /internal/suggestions (status=pending)
+       → Push: Telegram + Panel badge «N pending»
+Operator → [Apply] или [Reject]
+       → Panel POST /api/v1/suggestions/{id}/apply
+       → Executor validates + executes (≤2 s)
+       → status=applied|rejected|expired; audit log
+```
+
+**Telegram (teloxide / Analyst bot):**
+```
+📊 Analyst · BTCUSDT
+Прогноз: UP (conf 72%)
+Предложение: manual_entry Long futures, 5% alloc
+Обоснование: EMA50>200, Z=2.3, стакан bid-heavy
+[✅ Apply] [❌ Reject] [📋 Details]
+```
+- Callback `apply:{suggestion_id}` / `reject:{suggestion_id}`
+- TTL предложения: **24 h** (config `suggestion_ttl_hours`); expired → auto-reject
+- **Rate limit Apply:** max 10 applies / час / оператор
+
+**Безопасность Apply:**
+- `manual_entry` проходит **полный Risk Engine**; отклоняется если DD/halt/fees fail
+- `manual_entry` max size: `min(proposed_size_pct, max_manual_entry_pct)` default **5%** alloc
+- `config_patch` — только whitelist ключей (`signals.*`, `take_profit.*`, `risk.*` — не API keys)
+- Replay-check (опц.): если `require_replay_on_config = true`, Apply config только если replay PF не падает > 10%
+
+**Panel API (дополнение §8.5.5):**
+```
+GET  /api/v1/suggestions?status=pending
+GET  /api/v1/suggestions/{id}
+POST /api/v1/suggestions/{id}/apply      # operator JWT
+POST /api/v1/suggestions/{id}/reject
+```
+
+**Структура `Suggestion`:**
+```json
+{
+  "id": "uuid",
+  "created_at": "ISO8601",
+  "expires_at": "ISO8601",
+  "status": "pending|applied|rejected|expired",
+  "kind": "manual_entry",
+  "payload": { "symbol": "BTCUSDT", "direction": "long", "instrument": "futures", "size_pct": 0.05 },
+  "rationale": "LLM + MA + orderbook imbalance 0.62",
+  "confidence": 0.72,
+  "source": "analyst"
+}
+```
+
+#### 8.6.5. Отчёты и Analyst API
+
+| Канал | Содержимое |
+|-------|------------|
+| Telegram | Daily digest + **push pending suggestions** |
+| Panel | Вкладки «Analyst», «Pending (N)» |
+| Trade journal | → TimescaleDB (§8.7) |
+
+```
+GET  /analyst/v1/forecasts
+GET  /analyst/v1/forecasts/{symbol}
+GET  /analyst/v1/reports/daily?date=
+POST /analyst/v1/analyze-now
+POST /analyst/v1/suggestions/generate    # internal / cron
+```
+
+#### 8.6.6. Trade journal → БД
+
+Поля: `entry_ts`, `exit_ts`, `symbol`, `instrument`, `direction`, prices, `z_entry`, `vel_entry`, `d_exp`, `d_min_net`, `regime`, `ma_bias_*`, `ob_imbalance_entry` (§8.7), `slippage_pct`, `fees_usdt`, `net_pnl_pct`, `exit_reason`. Export из Executor 1×/час → PostgreSQL/TimescaleDB.
+
+#### 8.6.7. Конфиг `analyst.toml`
+
+```toml
+[analyst]
+enabled = false                       # true только в Фазе 2
+min_trading_days_before_start = 14    # ждём накопления БД
+llm_provider = "openai"
+llm_model = "gpt-4o-mini"
+forecast_interval_min = 15
+suggestion_ttl_hours = 24
+max_manual_entry_pct = 0.05
+push_pending_to_telegram = true
+database_url = "postgres://bot@localhost/bot_warehouse"
+
+[analyst.ma]
+ema_periods = [50, 200, 500]
+```
+
+#### 8.6.8. Go/No-Go перед live (Фаза 1 — без Analyst)
+
+| # | Критерий | Порог | Блокирует live? |
+|---|----------|-------|-----------------|
+| 1–4, 6–7 | §8.6.8 v1.7 (PF, follow-through, paper) | см. v1.7 | **Да** |
+| 5 | Analyst forecast accuracy | ≥ 55% | **Нет** (Фаза 2) |
+
+#### 8.6.9. Связь с ботом
+
+- Без **Apply** Analyst **не влияет** на торговлю.
+- Apply → Panel command queue → тот же путь, что ручные действия оператора (§8.5).
+- Auto-apply **запрещён** в v1.8.
+
+### 8.7. Order Book Warehouse — накопление стаканов и паттернов (**Фаза 2**)
+
+Параллельно с Analyst — сбор и хранение данных стакана для offline-анализа и обогащения LLM.
+
+#### 8.7.1. Источники и частота
+
+| Биржа | Поток | Частота | Глубина |
+|-------|-------|---------|---------|
+| Binance Futures | `@depth10@100ms` | 10 Hz | 10 levels |
+| Bybit Linear | `@orderbook.50` или REST snapshot | 10–20 Hz | 50 levels |
+| Bybit Spot | `@orderbook.50` | 10 Hz | 50 levels |
+
+**Collector `book-collector`** (Rust или Python sidecar, **не hot path**):
+- Подписка на те же пары, что whitelist
+- Snapshot + delta → нормализованный формат → batch insert в БД каждые 1–5 с
+
+#### 8.7.2. Схема БД (TimescaleDB / PostgreSQL)
+
+```sql
+-- orderbook_snapshots (hypertable по ts)
+ts TIMESTAMPTZ, symbol TEXT, exchange TEXT,  -- binance_futures | bybit_linear | bybit_spot
+bid_prices DOUBLE PRECISION[], bid_qtys DOUBLE PRECISION[],
+ask_prices DOUBLE PRECISION[], ask_qtys DOUBLE PRECISION[],
+mid DOUBLE PRECISION, spread_pct DOUBLE PRECISION,
+imbalance DOUBLE PRECISION,              -- (bid_vol - ask_vol) / (bid_vol + ask_vol) top-10
+depth_bid_usd DOUBLE PRECISION, depth_ask_usd DOUBLE PRECISION
+
+-- orderbook_features (агрегаты 1 min — для Analyst)
+ts, symbol, exchange,
+imbalance_mean, imbalance_std, spread_mean,
+bid_wall_detected BOOL, ask_wall_detected BOOL,
+binance_bybit_imbalance_delta DOUBLE PRECISION
+```
+
+Retention: raw snapshots **30 дней**; минутные features **1 год**. Сжатие TimescaleDB continuous aggregates.
+
+#### 8.7.3. Паттерны для Analyst
+
+| Паттерн | Описание | Использование |
+|---------|----------|---------------|
+| **Imbalance momentum** | Δimbalance за 30 s | Подтверждение direction forecast |
+| **Wall appearance** | bid/ask wall > 3× median size | `risk_note` в suggestion |
+| **Binance→Bybit lag** | imbalance Binance опережает Bybit | Оценка follow-through |
+| **Spread widening** | spread > p95 | Предложение halt или skip pair |
+| **Pre-signal footprint** | ob shape за 60 s до `entry_valid` | Offline tuning Z/Vel |
+
+Analyst при генерации `manual_entry` / forecast **обязан** прикладывать `ob_imbalance`, `wall_detected` из `orderbook_features`.
+
+#### 8.7.4. Минимальный объём перед включением Analyst
+
+| Метрика | Порог |
+|---------|-------|
+| Календарных дней сбора | ≥ 14 |
+| Snapshots на пару | ≥ 100 000 |
+| Закрытых сделок в journal | ≥ 50 |
+
 ---
 
 ## 9. Тестирование, валидация и развертывание
@@ -792,11 +1039,20 @@ Telegram — мобильные алерты; панель — основной 
 | **Safe-Mode phased** | Integration | Фаза 1 не закрывает; фаза 3 закрывает все |
 | **Cancel + restore stop** | Integration | После cancel-all exchange stop восстановлен ≤ 2 s |
 | **MVP mono-node** | §2.4 deploy | 3–5 futures pairs; spot disabled; PF paper ≥ 1.2 |
+| **Analyst Service** | §8.6.4 | Proposal+Apply e2e; manual_entry через Risk; TTL expire |
+| **Order Book DB** | §8.7 | ≥100k snapshots/пара; features 1 min |
+| **Go/No-Go** | §8.6.7 checklist | Пункты 1–4, 6–7 pass перед live |
 
 ### 9.2. CI/CD и развертывание
+
+**Фаза 1 (минимальный deploy):**
+- `bot-mvp.service` (или `observer` + `executor`), `telegram-alerts.service`, `control-panel.service`
+
+**Фаза 2 (добавляется к Фазе 1):**
+- `book-collector.service`, `analyst.service`, PostgreSQL/TimescaleDB
+
 - Pipeline: GitHub Actions → fmt → clippy → test → release → S3 → SSH deploy.
-- Сервисы: `systemd` (`bot-mvp.service` **или** `observer.service` + `executor.service`, `telegram-alerts.service`, `control-panel.service`).
-- Конфиг: `/etc/bot/config.toml`, `/etc/bot/symbols.toml`.
+- Конфиг: `/etc/bot/config.toml`, `symbols.toml`, `analyst.toml` (Фаза 2).
 - Rollback: документирован в Runbook.
 
 ---
@@ -973,12 +1229,20 @@ futures_alloc_pct = 0.10
 # spot_margin_enabled = true    # Short через Bybit Spot Margin API
 ```
 
-### 10.3. Telegram-бот (Executor)
+### 10.3. Telegram-бот (Executor + Analyst push, Фаза 2)
+
+**Trading (всегда):**
 - `/status` → Spot/Futures equity, net PnL, позиции, Latency, halt-флаги
 - `/pause spot` / `/pause futures` / `/pause all` → Stop new entries (§8.5.9)
 - `/resume spot` / `/resume futures` / `/resume all`
-- `/cancel spot` / `/cancel futures` → Cancel all orders на счёте (позиции не закрываются)
-- `/flush spot` / `/flush futures` / `/flush all` → Close all positions + cancel orders + halt
+- `/cancel spot` / `/cancel futures` → Cancel all orders
+- `/flush spot` / `/flush futures` / `/flush all` → Close all + halt
+
+**Analyst (Фаза 2) — оператор away from desk:**
+- Push-сообщение с inline-кнопками **`[✅ Apply]` `[❌ Reject]` `[📋 Details]`** на каждое `Suggestion`
+- `/pending` → список активных предложений (id, kind, symbol, TTL)
+- `/apply {id}` / `/reject {id}` — текстовый fallback если кнопки недоступны
+- Callback `apply:uuid` → Panel `POST /api/v1/suggestions/{id}/apply` от имени оператора
 
 ### 10.4. Структуры данных (Rust)
 ```rust
@@ -1037,18 +1301,81 @@ pub struct BybitExitMetrics {
 }
 ```
 
-### 10.5. Порядок внедрения (спринты)
-| Спринт | Модуль | Зависимости |
-|--------|--------|-------------|
-| **0** | **MVP mono-node** §2.4: in-process Observer+Executor, 3 futures pairs, replay + paper | — |
-| 1 | `.bin` лог + Tick-Replay + latency inject 150 ms | postcard, tokio, memmap2 |
-| 2 | Observer: WS + парсинг + RingBuffer + Entry Engine §7 | simd-json, zenoh |
-| 3 | Executor: Risk hot/warm + Bybit connectors | Bybit V5 WS |
-| 4 | SL/TP state machine §5.0 + partial close + Spot fail-safe | PositionState |
-| 5 | Dynamic Z_threshold + Regime matrix | §3.3, config |
-| 6 | Funding/Basis warm cache + gap storm policy | Bybit REST |
-| 7 | Bybit exit EMA + Paper → Live staged | Runbook, Telegram |
-| 8 | Control Panel §8.5: REST/WS API, allocation, pair enable/disable, profit dashboard | axum, Executor command queue |
+### 10.5. Порядок внедрения (спринты — детализация)
+
+> Сводная дорожная карта по фазам — **§10.6**.
+
+| Спринт | Модуль | Фаза |
+|--------|--------|------|
+| **0–7** | MVP → Paper → Live staged (§10.6 Фаза 1) | **1** |
+| **8** | Control Panel §8.5 | **1** |
+| **9a** | `book-collector` + TimescaleDB §8.7 | **2** |
+| **9b** | Trade journal → DB; 14 дней накопления | **2** |
+| **10** | Analyst: MA + LLM + forecasts | **2** |
+| **11** | Proposal & Apply: Telegram + Panel §8.6.4 | **2** |
+
+### 10.6. Дорожная карта разработки (Фаза 1 → Фаза 2)
+
+```
+═══════════════════════════════════════════════════════════════════
+  ФАЗА 1 — ТОРГОВЛЯ + ПАНЕЛЬ          цель: bot зарабатывает на paper/live
+═══════════════════════════════════════════════════════════════════
+  Этап 1.1  MVP mono-node (§2.4)
+            └── Rust: Observer+Executor in-process, 3 futures pairs
+
+  Этап 1.2  Ядро стратегии
+            └── Entry Engine §7, Risk §4.2, SL/TP §5, fee-aware §6.3
+            └── .bin логи, Replay + latency 150 ms
+
+  Этап 1.3  Control Panel §8.5
+            └── equity, alloc %, halt/cancel, net PnL, pairs CRUD
+            └── Telegram trading commands §10.3
+
+  Этап 1.4  Paper → Go/No-Go §8.6.8
+            └── PF ≥ 1.2, follow-through ≥ 40%, 100+ сделок
+            └── Live staged 1% депозита, 7 дней
+
+  Этап 1.5  Production (опционально)
+            └── dual-node Tokyo+Singapore, 20+ pairs, spot off
+
+  ✓ Критерий завершения Фазы 1: live futures торгует; Panel работает;
+    operator управляет с телефона (halt/status/flush).
+
+═══════════════════════════════════════════════════════════════════
+  ФАЗА 2 — БД + ИИ АНАЛИТИК          цель: паттерны + советы + Apply
+═══════════════════════════════════════════════════════════════════
+  Этап 2.1  Data Warehouse §8.7
+            └── PostgreSQL/TimescaleDB
+            └── book-collector: Binance depth + Bybit orderbook
+            └── мин. 14 дней сбора, 100k snapshots/пара
+
+  Этап 2.2  Trade journal в БД §8.6.6
+            └── связка сделок с ob_imbalance на входе
+            └── continuous aggregates (1 min features)
+
+  Этап 2.3  Analyst Service §8.6
+            └── MA engine, LLM forecast up/down/neutral
+            └── pattern rules: imbalance, walls, lag Binance→Bybit
+
+  Этап 2.4  Proposal & Apply §8.6.4
+            └── SuggestionQueue: config, alloc, manual_entry, close
+            └── Telegram [Apply][Reject] + Panel «Pending»
+            └── manual_entry через Risk Engine; TTL 24h
+
+  ✓ Критерий завершения Фазы 2: Analyst шлёт предложения; operator
+    применяет с телефона; audit log; forecast accuracy tracked.
+
+═══════════════════════════════════════════════════════════════════
+  OUT OF SCOPE v1.8: auto-apply; Analyst в hot path; spot без PF gate
+═══════════════════════════════════════════════════════════════════
+```
+
+| Фаза | Срок (ориентир) | Стек | Зависит от |
+|------|-----------------|------|------------|
+| **1** | 8–12 недель | Rust, axum, teloxide | — |
+| **2** | 6–8 недель после старта БД | Python, TimescaleDB, LLM | Фаза 1 live ≥ 14 дней |
+
+**Параллельность:** `book-collector` можно запустить **в конце Фазы 1** (этап 1.4 paper) — к старту Analyst БД уже накоплена.
 
 ---
 
@@ -1161,3 +1488,33 @@ pub struct BybitExitMetrics {
 | 10 | §9.1 | Replay follow-through ≥ 40% @ 150 ms delay |
 | 11 | `[deployment]`, `[safe_mode]`, `[spot]` config | Новые секции config.toml |
 | 12 | `BybitExitMetrics.volume_delta_100ms` | Warm path microstructure |
+
+---
+
+## 17. Изменения v1.6 → v1.7
+
+| # | Добавлено | Описание |
+|---|-----------|----------|
+| 1 | §8.6 Analyst Service | Отдельный сервис: MA/EMA наблюдение, прогноз up/down/neutral |
+| 2 | LLM forecast layer | JSON in/out; confidence; fallback rule-based |
+| 3 | MA Binance + Bybit | EMA50/200/500; cross; divergence alert |
+| 4 | Trade journal parquet | Export для Analyst и оператора |
+| 5 | Go/No-Go checklist §8.6.7 | Обязательные критерии перед live |
+| 6 | `analyst.toml` | Отдельный конфиг; port 8081 |
+| 7 | Спринт 9 | Analyst после paper trading |
+| 8 | Жёсткий запрет | Analyst не трейдер; не пишет в trading config |
+
+---
+
+## 18. Изменения v1.7 → v1.8
+
+| # | Добавлено | Описание |
+|---|-----------|----------|
+| 1 | §10.6 Дорожная карта | **Фаза 1** (бот+Panel) / **Фаза 2** (БД+Analyst) |
+| 2 | §8.6.4 Proposal & Apply | SuggestionQueue; Telegram [Apply][Reject]; Panel API |
+| 3 | Типы suggestions | config, alloc, manual_entry, close, halt |
+| 4 | §8.7 Order Book Warehouse | book-collector, TimescaleDB, паттерны стакана |
+| 5 | Operator mobile | Push pending; `/pending`, `/apply {id}` |
+| 6 | Фаза 2 gate | ≥14 дней БД, 100k snapshots, 50 сделок |
+| 7 | book-collector | Старт в конце Фазы 1 (paper) |
+| 8 | Auto-apply | Явно **запрещён** v1.8 |
