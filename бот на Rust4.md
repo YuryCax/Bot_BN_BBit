@@ -1,11 +1,14 @@
 # 📘 ТЕХНИЧЕСКОЕ ЗАДАНИЕ (ТЗ)
 ## Low-Latency Алготрейдинговая Система: Binance Futures → Bybit Spot/Perpetual
-**Версия:** 1.3  
+**Версия:** 1.6  
 **Дата:** 08.07.2026  
 **Язык разработки:** Rust 1.78+  
 **Среда исполнения:** Linux (Ubuntu 22.04/24.04 LTS), `x86_64`/`aarch64`  
-**Архитектура:** Распределённая двухузловая (`Observer` → `Executor`)  
+**Архитектура:** Распределённая двухузловая (`Observer` → `Executor`) или **MVP mono-node** (§2.4)  
 
+> **Changelog v1.6:** исправлен `D_min_net` (fees без ×Lev); §5.5 единый `effective_SL`; fee-BE унифицирован; `MICRO_OK` по Bybit; Safe-Mode поэтапный; cancel-all → auto re-place exchange stop; replay с delay 150 ms; MVP mono-node; futures-first для spot.  
+> **Changelog v1.5:** цель «рост депозита, не слив»; §5.4 адаптивное SL/TP по метрикам Binance; §6.0 раздельные депозиты Spot/Futures; §6.3 fee-aware sizing (вход/TP с учётом комиссий); §8.5.9 раздельная остановка торговли и снятие ордеров Spot/Futures.  
+> **Changelog v1.4:** добавлена §8.5 «Панель управления» — веб-UI для распределения капитала по парам (% от депозита), включения/остановки пар, отображения профита (realized/unrealized, по паре и суммарно).  
 > **Changelog v1.3:** формализовано принятие решения о входе (Observer only), исправлена машина состояний SL/TP, уточнена стратегия (lead-lag/momentum), политика Spot Short, единицы измерения, Risk Engine hot/warm path, freshness 150 ms, exit-EMA по Bybit, fail-safe Spot, политика потерь UDP, `packet_version = 2`.  
 > **Changelog v1.2:** добавлен динамический Take-Profit (§5.4) с трейлингом, частичной фиксацией и интеграцией со стоп-лоссом.  
 > **Changelog v1.1:** исправлена синхронизация времени между узлами, устранены противоречия в структурах данных и конфиге, интегрированы модули §11, уточнена логика Long/Short и Spot/Futures.
@@ -16,11 +19,13 @@
 
 | Параметр | Спецификация |
 |----------|--------------|
-| **Назначение** | Автоматизированная **кросс-биржевая импульсная торговля (lead-lag / momentum)** с минимальной задержкой. Сбор рыночных метрик с **Binance Futures** (единственный источник сигналов), передача по внутренней сети AWS, финальная валидация рисками, исполнение и сопровождение позиций на **Bybit Spot** и **Bybit USDT Perpetual** (Long; Short — см. §4.3). **Не является классическим арбитражем:** basis filter (§4.2) сознательно отсекает расхождения цен > 0.05%; система ставит на коррелированное движение Bybit вслед за импульсом Binance Futures. |
+| **Назначение** | Автоматизированная **кросс-биржевая импульсная торговля (momentum / correlated follow-through)** с минимальной задержкой. **Binance Futures** — единственный источник сигналов и метрик для SL/TP; **Bybit** — исполнение. Basis filter (§4.2) отсекает расхождения > 0.05%; система ставит на **следующее** коррелированное движение Bybit вслед за импульсом Binance (не классический lag-arb и не арбитраж уже открытого gap). |
+| **Главная цель** | **Рост депозита, а не его слив.** Бот входит только когда ожидаемая прибыль **после комиссий** (§6.3) положительна; в открытой позиции **поднимает SL и TP** по метрикам Binance (§5.4), фиксируя прибыль и защищая капитал. Сделки «в ноль минус комиссия» запрещены. |
+| **Приоритет рынков** | **Futures-first:** основной edge из‑за меньших комиссий и Long/Short. Spot — **фаза 2**, только после paper PF ≥ 1.3 на futures (§6.0, §9.1). |
 | **Принцип разделения** | `Observer` (Токио) = сбор данных, фильтрация шума, расчёт метрик, **полная оценка условий входа §7**, генерация `MarketStatePacket` с `entry_valid` + `direction_bias`.<br>`Executor` (Сингапур) = freshness/dedup, **Risk Engine (только фильтры исполнения)**, маршрутизация Spot/Futures, исполнение, ведение позиции, **локальный EMA для exit-триггеров**, управление капиталом.<br>**Дублирование entry-логики (Z, D_exp, D_min) на Executor запрещено.** |
-| **Технологический стек** | Rust, `tokio`, `simd-json`, `zenoh`, `postcard`, `crossbeam`, `tracing`, `prometheus`, `rustls`, `teloxide` (только на Executor / отдельном сервисе алертов). |
-| **Инфраструктура** | AWS: `ap-northeast-1` (Токио), `ap-southeast-1` (Сингапур). Связь строго по внутренним IP через AWS Backbone (VPC Peering / Transit Gateway). |
-| **Допустимые инструменты** | Статический Whitelist: 20–35 пар. Динамическая подписка/отписка в процессе работы запрещена. |
+| **Технологический стек** | Rust, `tokio`, `simd-json`, `zenoh`, `postcard`, `crossbeam`, `tracing`, `prometheus`, `rustls`, `teloxide` (только на Executor / отдельном сервисе алертов), **Control Panel** (§8.5): `axum` + REST/WebSocket API, статический SPA (React/Vue) или server-rendered UI. |
+| **Инфраструктура** | **Production:** AWS `ap-northeast-1` (Observer) + `ap-southeast-1` (Executor), VPC Peering.<br>**MVP (§2.4):** один сервер `ap-southeast-1`, in-process Observer+Executor — до подтверждения PF на paper. |
+| **Допустимые инструменты** | Whitelist: 20–35 пар. Стартовый набор — `config.toml` / `symbols.toml`. **Добавление и остановка пар в runtime** — только через Панель управления (§8.5) с hot-reload; произвольная подписка без оператора запрещена. |
 | **Ключевые ограничения** | One-way latency Токио→Сингапур P95 ≤ 80 мс, P99 ≤ 110 мс. Freshness drop > 150 мс. Hot path Risk Engine ≤ 10 мкс (§4.2). Проскальзывание входа ≤ 0.05%. Максимальный дневной DD: Spot ≤ 2%, Futures ≤ 1.5%. |
 
 ### 1.1. Архитектурная схема
@@ -53,7 +58,7 @@
 **Ключевые принципы:**
 1. **Токио не знает про ордера** — не хранит позиции, баланс, статус исполнения.
 2. **Сингапур не пересчитывает entry-метрики** — использует `entry_valid`, `direction_bias`, `d_exp`, `d_min` из пакета; локально считает только **Bybit EMA** для exit-триггеров (§5.3).
-3. **Spot и Futures разделены на уровне коннекторов** в Executor; маршрутизация через `symbols.toml`.
+3. **Spot и Futures разделены на уровне коннекторов и депозитов** (§6.0): отдельные кошельки Bybit, отдельные лимиты капитала и команды остановки; маршрутизация через `symbols.toml`.
 4. **Long и Short** — симметричная логика входа/выхода с инверсией условий (§7).
 
 ### 1.2. Принятие решения о входе (единственный источник — Observer)
@@ -61,7 +66,7 @@
 ```
 [Tick Binance] → Noise Filter → Metrics (Z, Vel, EMA, ATR, regime)
        ↓
-  Entry Engine (§7): D_exp, D_min, Z_threshold, regime matrix
+  Entry Engine (§7): D_exp, D_min_net, Z_threshold, regime matrix
        ↓
   entry_valid = 1  ∧  direction_bias ∈ {-1, +1}  →  публикация пакета
   иначе            →  entry_valid = 0, direction_bias = 0
@@ -74,7 +79,23 @@
 
 **Executor не вызывает формулы §7 для входа.** Поля `d_exp`, `d_min`, `sigma` в пакете — для аудита, логов и метрик, не для пересчёта.
 
-### 1.3. Единицы измерения (обязательны для реализации)
+### 1.3. Логическая цепочка (Binance → Bybit)
+
+```
+НАБЛЮДЕНИЕ     АНАЛИЗ + РЕШЕНИЕ          ДЕЙСТВИЕ              СОПРОВОЖДЕНИЕ
+(Binance WS)   (Observer)               (Executor → Bybit)    (Executor)
+     │              │                          │                    │
+  aggTrade      Z, Vel, EMA, ATR         Risk Engine           SL/TP §5.4→§5.5
+  bookTicker    Entry Engine §7          open / close          (метрики Binance)
+  depth         entry_valid              Spot / Futures        + триггеры Bybit §5.2
+                direction_bias
+                     │
+                     └── MarketStatePacket ──→ (freshness ≤150 ms)
+```
+
+**Правило:** Binance — **единственный источник решения о входе** и **адаптации SL/TP в позиции**. Bybit — **единственный источник цены исполнения** (mid, spread, depth) и **microstructure filter** для входа (`MICRO_OK`, §4.2).
+
+### 1.4. Единицы измерения (обязательны для реализации)
 
 | Величина | Единица | Пример |
 |----------|---------|--------|
@@ -103,14 +124,14 @@
 - **Сериализация:** `postcard` + **версия схемы** `packet_version: u8` (текущая = **`2`**). При изменении структуры — инкремент версии; узлы с несовместимой версией не стартуют.
 - **Топик:** `market/binance/{symbol_id}`
 - **Частота публикации:** 50–100 Гц в штатном режиме, до 500 Гц при `|Z| ≥ Z_threshold`.
-- **Heartbeat:** Отдельный топик `system/heartbeat/tokyo`, пакет с `ts_ns` каждые 100 мс. Timeout: 500 мс → триггер `Safe-Mode`.
+- **Heartbeat:** Отдельный топик `system/heartbeat/tokyo`, пакет с `ts_ns` каждые 100 ms. Пропуски → поэтапный Safe-Mode (§5.2.1); emergency при timeout > 500 ms.
 - **Таймстампы:** `ts_ns` = **UTC wall-clock** (`CLOCK_REALTIME`, наносекунды с эпохи). Синхронизация: `chrony` со stratum ≤ 2 на обоих узлах. **Запрещено** использовать `CLOCK_MONOTONIC` в межузловых пакетах.
 - **Политика потерь UDP:**
   - **Dedup:** `seq_num <= last_seq_num[symbol_id]` → drop.
   - **Gap detection:** `seq_num > last + 1` → `seq_gap_count++`, лог `WARN`.
   - **Gap storm:** если `seq_gap_count > 10` за 1 с по символу → `pause_entries[symbol_id]` на 5 с, алерт.
   - Потерянные пакеты **не интерполируются**; следующий валидный пакет принимается как есть.
-- **Safe-Mode RTT:** скользящий P95 one-way latency за 10 с > **150 мс** → Safe-Mode (§5.3). Измерение — тот же `utc_now_ns() − packet.ts_ns`, не round-trip heartbeat.
+- **Safe-Mode RTT:** скользящий P95 one-way latency за 10 с > **150 ms** → Safe-Mode фаза 1 (§5.2.1). Измерение — `utc_now_ns() − packet.ts_ns`.
 
 ### 2.3. Настройки ОС и ядра (Linux Tuning)
 
@@ -134,6 +155,21 @@ taskset -c 0,1,2,3 ./executor   # все ядра c7a.xlarge под Executor
 TCP_NODELAY=1 для всех внешних подключений (Binance/Bybit)
 SO_RCVBUF/SO_SNDBUF=131072 для Binance/Bybit сокетов
 ```
+
+### 2.4. MVP mono-node (обязательный этап перед dual-node production)
+
+До развёртывания двух регионов — **обязательный** прогон на одном сервере:
+
+| Параметр | MVP | Production |
+|----------|-----|------------|
+| **Регион** | `ap-southeast-1` (рядом с Bybit) | Tokyo + Singapore |
+| **Процессы** | `bot-mvp` = Observer + Executor in-process (channel вместо Zenoh UDP) | `observer` + `executor` |
+| **Inter-node latency** | 0 ms (shared memory / channel) | 50–110 ms |
+| **Пары** | 3–5 futures (BTC, ETH, SOL + опц.) | 20–35 |
+| **Spot** | **Отключён** (`spot_enabled = false`) | После paper PF ≥ 1.3 futures |
+| **Критерий перехода** | Replay PF ≥ 1.2 **с симулированным** delay 150 ms (§9.1) | Live staged 7 дней |
+
+> MVP **не заменяет** dual-node latency-тест; перед production обязателен replay/backtest с `injected_latency_ms = 150`.
 
 ---
 
@@ -164,11 +200,11 @@ SO_RCVBUF/SO_SNDBUF=131072 для Binance/Bybit сокетов
 - **Triple EMA:** EMA(50), EMA(200), EMA(500) по тикам. В пакет передаются `ema_50` и `ema_200`; EMA(500) используется локально для regime filter.
 - **ATR(14):** Инкрементальный расчёт на тиках. Фильтр микро-флета: `ATR / price < 0.2%` → `entry_valid = 0`.
 - **Regime Detection:** `TrendStrength = |EMA_50 - EMA_200| / ATR`. `regime: u8` (0=Range, 1=Transition, 2=Trend) — см. матрицу §7.
-- **Микроструктурные метрики:** `bid_ask_imbalance`, `volume_delta_100ms` — из `@bookTicker` + `@aggTrade` (справочно; microstructure filter на Executor).
+- **Микроструктурные метрики:** `bid_ask_imbalance`, `volume_delta_100ms` — из `@bookTicker` + `@aggTrade`; передаются в пакете **только для аудита**. Фильтр `MICRO_OK` на входе — по **Bybit** (§4.2 warm path), не по Binance delta.
 - **Z_threshold (приоритет):**
   - `use_dynamic_thresholds = false` → `z_score_entry` из config (по умолчанию 2.5).
   - `use_dynamic_thresholds = true` → `Z_threshold = clamp(percentile(|Z|, 5000, 0.95) × 1.1, 1.8, 3.2)`; **`z_score_entry` игнорируется**.
-- **Entry Engine (после метрик):** вычисляет `D_min`, `D_exp`, проверяет условия §7; выставляет `entry_valid`, `direction_bias`, записывает `d_exp`, `d_min`, `sigma`, `z_threshold_used` в пакет.
+- **Entry Engine (после метрик):** вычисляет `D_min_net`, `D_exp`, проверяет условия §7; выставляет `entry_valid`, `direction_bias`, записывает `d_exp`, `d_min`, `sigma`, `z_threshold_used` в пакет (`d_min` = `D_min_net`).
 - **Публикация:** `MarketStatePacket` → `postcard` → Zenoh. Batching ≤ 1 мс.
 
 ---
@@ -198,7 +234,7 @@ Risk Engine разделён на два контура:
 | **Warm path** | ≤ 1 ms (данные ≤ 100 ms stale OK) | capital, DD, correlation, Bybit spread/depth, funding, basis | Фоновые задачи |
 
 **Warm path — фоновые задачи (не в hot path):**
-- `@bookTicker` Bybit WS → spread, depth, `bybit_mid` (каждый тик).
+- `@bookTicker` + `@aggTrade` Bybit WS → spread, depth, `bybit_mid`, **`bybit_volume_delta_100ms`** (каждый тик).
 - `GET /v5/market/tickers?category=linear` → funding (интервал `ticker_poll_interval_sec`, по умолчанию 60 с).
 - Balance / margin / DD — каждые 500 ms или по событию fill.
 
@@ -212,9 +248,13 @@ Risk Engine разделён на два контура:
 | `BOOK_OK` | Bybit spread ≤ 0.01%, depth_10 ≥ $50k |
 | `FUNDING_OK` (Futures) | `\|fundingRate\| ≤ 0.0001` или вход не против фандинга |
 | `BASIS_OK` | `\|ref_price − bybit_mid\| / bybit_mid ≤ 0.0005` |
-| `MICRO_OK` | Long: `volume_delta_100ms ≥ 0`; Short: `volume_delta_100ms ≤ 0` |
+| `MICRO_OK` | Long: `bybit_volume_delta_100ms ≥ 0`; Short: `bybit_volume_delta_100ms ≤ 0` (**Bybit** aggTrade/book, warm path) |
 | `SPOT_SIDE_OK` | Short на Spot только при `spot_margin_enabled` (§4.3) |
 | `PAUSE_OK` | Нет `pause_entries` после gap storm (§2.2) |
+| `PAIR_ENABLED` | Пара `enabled = true` в symbols.toml / панели (§8.5.3) |
+| `ENTRIES_SPOT_OK` | `halt_entries_spot = false` (§8.5.9) |
+| `ENTRIES_FUTURES_OK` | `halt_entries_futures = false` (§8.5.9) |
+| `FEE_EDGE_OK` | `D_exp ≥ D_min_net` из пакета (§6.3) |
 
 **Hot path pseudocode:**
 ```rust
@@ -265,6 +305,7 @@ pub enum InstrumentType { Spot, Futures }
 - **При открытии позиции (Spot Long):** если `spot_exchange_stop = true` (config), выставляется **reduce-only Stop-Limit** на бирже на уровне `initial_sl × (1 − sl_exchange_buffer_pct)` (Long) с буфером 0.1%.
 - **При каждом обновлении virtual SL:** если SL сдвинулся > 0.05% — amend exchange stop (debounce 1 s).
 - **При штатном закрытии:** cancel exchange stop до market/limit close.
+- **После `cancel-all orders` (§8.5.9):** если spot-позиция открыта → **немедленно** re-place exchange stop по текущему `effective_SL` (§5.5); алерт «stop restored».
 - **Crash / SIGKILL:** exchange stop остаётся на бирже — единственная защита Spot при падении Executor.
 - **Watchdog:** `systemd` `WatchdogSec=30`, `Restart=always`. При недоступности > 30 s + открытые позиции → Alertmanager `CRITICAL` (оператор вручную через `/flush` или биржу).
 
@@ -279,15 +320,15 @@ pub enum InstrumentType { Spot, Futures }
 ```
 [OPEN]
   SL = Entry ∓ ATR×1.8          (initial)
-  TP_fixed = Entry × (1 ± 0.5%)  (TP-0 target, виртуальный)
+  TP_fixed = Entry × (1 ± max(initial_target_pct, D_min_net))  (TP-0, §6.3)
        │
-  PnL ≥ 0.15% ──→ SL-1: Entry ∓ ATR×0.5
+  PnL ≥ 0.15% ──→ SL-1: Entry ∓ ATR×0.5  (но не ниже fee-BE, §6.3)
        │
-  PnL ≥ 0.30% ──→ SL-BE: Stop = Entry (безубыток)
+  PnL ≥ 0.30% ──→ SL-BE: Stop = fee-BE (Entry + round-trip fees)
        │           TP phase → TrailArm (начало трейлинга остатка)
        │
   Price crosses TP_fixed ──→ TP-0: закрыть 50% (partial_close_pct)
-       │           SL остаётся Entry на остатке
+       │           SL остаётся fee-BE на остатке (§6.3)
        │           TP phase → DynamicTrail
        │
   DynamicTrail ──→ TP = Price ∓ ATR×K_tp (monotonic)
@@ -301,30 +342,60 @@ pub enum InstrumentType { Spot, Futures }
 |-----------|-----|----------|----------|
 | Open | Entry ∓ ATR×1.8 | Initial | TP_fixed установлен |
 | ≥ 0.15% | Entry ∓ ATR×0.5 | Initial | — |
-| ≥ 0.30% | Entry (BE) | TrailArm | Трейлинг TP активен, partial ещё нет |
-| Cross TP_fixed (+0.5%) | Entry (BE) | DynamicTrail | Partial 50%; SL/TP на остатке |
-| Extended (opt.) | BE или trail | Extended | Futures + Trend only |
+| ≥ 0.30% | fee-BE (§6.3) | TrailArm | Трейлинг TP активен, partial ещё нет |
+| Cross TP_fixed | fee-BE (§6.3) | DynamicTrail | Partial 50%; SL/TP на остатке |
+| Extended (opt.) | fee-BE или trail | Extended | Futures + Trend only |
 
 **Long:** SL только повышается; TP trail — `max(TP_old, Price − ATR×K_tp)`.  
 **Short:** SL только понижается; TP trail — `min(TP_old, Price + ATR×K_tp)`.
 
+**Итоговый SL всегда через §5.5 (`effective_SL`)** — fee-BE, пороги PnL и Binance-adaptive не могут ослабить защиту.
+
+### 5.5. Единое разрешение SL (`effective_SL`)
+
+Три независимых источника предлагают уровень стопа; применяется **наиболее защитный** (для Long — максимальная цена SL):
+
+```
+sl_pnl      = SL из порогов PnL (§5.0: initial → SL-1 → fee-BE)
+sl_binance  = SL из метрик Binance (§5.4: adaptive tighten)
+sl_fee_be   = fee-BE (§6.3) — абсолютный пол
+
+effective_SL_long  = max(sl_pnl, sl_binance, sl_fee_be)
+effective_SL_short = min(sl_pnl, sl_binance, sl_fee_be)
+```
+
+- **Long:** SL только ↑ относительно предыдущего `effective_SL`.
+- **Short:** SL только ↓.
+- `current_stop` в `PositionState` = `effective_SL` после каждого пакета Observer + tick Bybit.
+- Exchange stop (Spot §4.5, Futures §5.1) синхронизируется с `effective_SL`, не с промежуточными кандидатами.
+
 ### 5.1. Виртуальный стоп и синхронизация с биржей
 - Стоп по умолчанию **виртуальный** (в памяти Executor).
 - **Futures:** реальный `Stop-Market` на Bybit обязателен; amend каждые 5 с или при `ΔATR > 15%`. Ликвидационная цена локально; `Distance_to_Liq < 0.4%` → закрытие 50%.
-- **Spot:** виртуальный SL + optional exchange Stop-Limit (§4.5). При `heartbeat_timeout > 500 ms` → немедленный market close всех Spot-позиций.
+- **Spot:** виртуальный SL + optional exchange Stop-Limit (§4.5). Safe-Mode — см. §5.2 (поэтапный, не мгновенный close).
 
 ### 5.2. Триггеры выхода
 
 | Триггер | Условие | Источник данных | Действие |
 |---------|---------|-----------------|----------|
-| Stop-Loss | `bybit_mid` пересекает `current_stop` | Bybit bookTicker | Market (Limit fallback §4.4) |
+| Stop-Loss | `bybit_mid` пересекает `effective_SL` (§5.5) | Bybit bookTicker | Market (Limit fallback §4.4) |
 | Take-Profit | `bybit_mid` пересекает `current_tp` | Bybit bookTicker | Partial / full (§5.0) |
 | Exhaustion | `\|Vel_binance\| < 0.00005` ∧ `\|Z_binance\| < 0.5` | Пакет Observer | Market close |
 | EMA Cross | `bybit_ema_50` пересекает `bybit_ema_200` против позиции | **Executor local EMA on Bybit mid** | Market close |
 | Spread Expansion | Bybit spread > 0.01% ∨ depth_10 < $50k | Bybit bookTicker | Limit ±0.02% |
-| Safe-Mode | Heartbeat loss / P95 latency > 150 ms | §2.2 | Block entries, close all |
+| Safe-Mode | Heartbeat loss / P95 latency > 150 ms | §2.2, §5.2.1 | Поэтапно: halt → close |
 
 **Приоритет:** Safe-Mode → Stop-Loss → Take-Profit → EMA Cross → Exhaustion → Spread Expansion.
+
+#### 5.2.1. Safe-Mode (поэтапный, без panic-close на первом glitch)
+
+| Фаза | Условие | Действие |
+|------|---------|----------|
+| **1 — Caution** | 1 пропуск heartbeat ИЛИ P95 latency > 150 ms | `halt_entries` spot + futures; позиции ведутся по SL/TP |
+| **2 — Defensive** | 2–3 пропуска heartbeat подряд (`safe_mode_heartbeat_misses`, default 3) | Tighten all SL → `effective_SL = fee-BE` minimum |
+| **3 — Emergency** | 5 пропусков ИЛИ heartbeat timeout > 500 ms | Market close **всех** позиций spot + futures |
+
+> Фаза 1 не закрывает позиции — защита от ложных срабатываний на сетевом jitter.
 
 > **Важно:** Entry-метрики (Z, Vel, EMA Binance) — из пакета Observer. **Exit EMA Cross** — только по Bybit mid на Executor (инкрементальный EMA(50/200), отдельный от Observer). Это **не дублирование entry-логики**.
 
@@ -354,22 +425,117 @@ K_tp_trail = clamp(base_tp_trail_atr × (1 + 0.1 × |Z|), 0.8, 1.5)
 
 | Событие | SL | TP |
 |---------|-----|-----|
-| PnL ≥ 0.15% | SL-1 (Entry ∓ ATR×0.5) | Initial |
-| PnL ≥ 0.30% | BE (Entry) | TrailArm |
-| TP-0 partial 50% | BE на остатке | DynamicTrail |
+| PnL ≥ 0.15% | SL-1 (Entry ∓ ATR×0.5), ≥ fee-BE | Initial |
+| PnL ≥ 0.30% | fee-BE (§6.3) | TrailArm |
+| TP-0 partial 50% | fee-BE на остатке | DynamicTrail |
 | SL до TP-0 | Full close | Cancelled |
 | `take_profit.enabled = false` | §5.0 SL only | Disabled |
+
+### 5.4. Адаптивное поднятие SL/TP по метрикам Binance
+
+**Смысл:** пока позиция открыта, Observer продолжает слать `MarketStatePacket` с актуальными Z, Velocity, ATR, regime с Binance Futures. Position Manager на Executor **на каждом пакете** пересчитывает SL/TP — не ждёт фиксированных порогов PnL, а реагирует на **положение дел на Binance**.
+
+| Сигнал Binance (из пакета) | Действие по SL | Действие по TP |
+|----------------------------|----------------|----------------|
+| `\|Z\|` растёт, `\|Vel\|` в сторону позиции, regime=Trend | Поднять SL (Long) / опустить SL (Short) на `ΔATR × k_sl_tight` (k=0.3); не ниже fee-BE (§6.3) | Расширить TP trail: `K_tp × 1.2`; фаза → Extended при `\|Z\| > 2.0` |
+| `\|Z\|` падает, `\|Vel\|` затухает (exhaustion) | Удержать текущий SL (не ослаблять) | Сузить TP trail; при `\|Vel\| < 0.00005` — досрочный выход (§5.2) |
+| Regime → Range после Trend | SL → fee-BE минимум | Partial close 50% если PnL ≥ `D_min_net`; остаток — tight trail |
+| Импульс против позиции (`Vel` разворот) | Немедленно SL → fee-BE или market close если PnL < 0 | Отменить Extended; ускорить выход |
+| ATR вырос > 15% vs entry | Пересчитать SL distance = `ATR × 1.8` (не уже fee-BE) | Пересчитать TP trail distance |
+
+**Правила монотонности (защита депозита):**
+- **Long:** SL только ↑; TP trail только ↑ (не отдаём заработанное).
+- **Short:** SL только ↓; TP trail только ↓.
+- Поднятие SL **никогда** не опускает защиту ниже **fee-breakeven** (цена входа + round-trip комиссии, §6.3).
+- Если Binance импульс сильный (`\|Z\| ≥ 2.5` ∧ `\|Vel\| > velocity_min`) — `sl_binance` → fee-BE **до** порога PnL 0.30% (опережающая защита); итог через §5.5.
+
+**Источник ATR/Z/Vel/regime:** пакет Observer (Binance). **Trigger price:** Bybit mid (§5.2). **Итоговый SL:** §5.5.
 
 ---
 
 ## 6. Управление капиталом и мультиинструментальность
 
+### 6.0. Раздельные депозиты Spot и Futures (Bybit)
+
+**Да — у Spot и Futures на Bybit разные балансы.** Даже в Unified Trading Account (UTA) API возвращает **раздельный equity**:
+- **Spot wallet** — USDT для спотовых сделок (`/v5/account/wallet-balance`, `accountType=UNIFIED`, coin USDT available for spot).
+- **Derivatives wallet** — маржа USDT Perpetual (`totalMarginBalance`, `totalAvailableBalance` для linear).
+
+Система **никогда не смешивает** эти пулы при расчёте размера позиции и allocation.
+
+| Параметр | Spot | Futures |
+|----------|------|---------|
+| Баланс | `spot_equity_usdt` | `futures_equity_usdt` |
+| Allocation пары | `spot_alloc_pct` — % от **spot** equity | `futures_alloc_pct` — % от **futures** equity |
+| DD лимит | ≤ 2% от spot equity | ≤ 1.5% от futures equity |
+| Max open positions | ≤ 3 | ≤ 2 |
+| Остановка торговли | `halt_entries_spot` (§8.5.9) | `halt_entries_futures` (§8.5.9) |
+
+- Обновление балансов: warm path Risk Engine, каждые 500 ms (`GET /v5/account/wallet-balance`).
+- В панели — **два отдельных блока**: «Spot депозит» и «Futures депозит» с equity, allocation, PnL, кнопками stop/cancel.
+- Перевод USDT Spot ↔ Futures **не автоматизируется** ботом; только вручную оператором на бирже (out of scope v1.6).
+
+**Политика Spot (фаза 2):**
+- Spot **отключён** в MVP (`deployment.spot_enabled = false`, §2.4).
+- Включение spot-пар — только после futures paper PF ≥ `min_futures_pf_for_spot` (default 1.3).
+- Spot-пары: `initial_target_pct` ≥ `spot_min_tp_pct` (default **0.008** = 0.8%) — иначе net edge после fees (§6.3) слишком мал при VIP0.
+- Spot Long-only по умолчанию (§4.3) — половина Binance Short-сигналов недоступна.
+
 ### 6.1. Слоты и размер позиции
-- Депозит делится на 5 слотов (по 20%).
-- **Формула размера (Futures):** `$Qty = \frac{Slot \times Risk\%}{ATR \times Multiplier}$`
-- **Формула размера (Spot):** та же формула; `Lev = 1`.
+- Капитал пары = `wallet_equity × alloc_pct` (spot или futures — §6.0).
+- Внутри лимита пары — до 5 слотов (по 20% от лимита пары) для одновременных входов **не используется** в v1.5; **одна позиция на пару**.
+- **Формула размера (Futures):** `$Qty = \frac{WalletEquity \times AllocPct \times Risk\%}{ATR \times Multiplier}$`
+- **Формула размера (Spot):** та же; `Lev = 1`.
 - Келли: **только оффлайн** для калибровки `Risk%` и `Multiplier`.
 - Динамическая адаптация: ликвидность недостаточна → объём уменьшается до `slippage ≤ 0.05%`.
+
+### 6.3. Fee-aware sizing — торговля с учётом комиссий (не «кормить биржу»)
+
+**Принцип:** каждая сделка должна иметь **положительное мат. ожидание после всех издержек**. Бот не открывает и не держит позицию, если net edge ≤ 0.
+
+**Комиссии (конфиг `[fees]`, обновляются из Bybit VIP tier или вручную):**
+
+| Рынок | Maker | Taker | По умолчанию (Bybit VIP0) |
+|-------|-------|-------|---------------------------|
+| Spot | `spot_maker_pct` | `spot_taker_pct` | 0.10% / 0.10% |
+| Futures | `futures_maker_pct` | `futures_taker_pct` | 0.02% / 0.055% |
+
+**Round-trip cost** (комиссии — от **notional**, leverage **не умножает** fee %):
+```
+fee_round_trip_spot    = spot_taker_pct × 2 + slippage_budget
+fee_round_trip_futures = futures_taker_pct × 2 + slippage_budget
+slippage_budget        = slippage_limit_pct (default 0.05%)
+profit_buffer          = fee_profit_buffer_pct (default 0.03%)
+
+D_min_net_spot    = fee_round_trip_spot + profit_buffer      # ≈ 0.28% VIP0
+D_min_net_futures = fee_round_trip_futures + profit_buffer   # ≈ 0.19% VIP0
+```
+
+> **Исправлено v1.6:** формула `× Lev` для fees **удалена** — комиссия биржи считается от notional сделки, не от маржи.
+
+**Минимальное движение для входа (Observer, §7):**
+```
+D_min_net = D_min_net_spot | D_min_net_futures   (по instrument пары)
+Вход разрешён ⟺ D_exp ≥ D_min_net
+```
+
+**Fee-breakeven (безубыток с комиссиями, не «голый» entry):**
+```
+BE_long  = Entry × (1 + fee_round_trip)
+BE_short = Entry × (1 − fee_round_trip)
+```
+SL-BE (§5.0, §5.4) устанавливается на **BE_long/BE_short**, а не на цену входа — иначе стоп в ноль = убыток на комиссиях.
+
+**Минимальный Take-Profit:**
+```
+TP_min_long  = Entry × (1 + D_min_net)
+TP_min_short = Entry × (1 − D_min_net)
+```
+`initial_target_pct` (§10.1) должен быть ≥ `D_min_net`; иначе конфиг невалиден при старте.
+
+**В панели профит показывается двумя строками:**
+- **Gross PnL** — без комиссий.
+- **Net PnL** — минус накопленные fees (realized); **Net — основной показатель** для оценки «депозит растёт или сливается».
 
 ### 6.2. Лимиты и ограничения
 - `MaxOpenPositions`: Spot ≤ 3, Futures ≤ 2.
@@ -386,11 +552,11 @@ K_tp_trail = clamp(base_tp_trail_atr × (1 + 0.1 × |Z|), 0.8, 1.5)
 | **Z-Score** | `$Z = \frac{P_{curr} - \mu}{\sigma}$` | `\|Z\| ≥ Z_threshold` (§3.3) |
 | **Z_threshold** | dynamic **или** `z_score_entry` | dynamic имеет **приоритет** при `use_dynamic_thresholds = true` |
 | **Velocity** | `(P_now − P_100ms) / P_100ms / 0.1` | доля/с; Long: `> velocity_min`; Short: `< −velocity_min` |
-| **Мин. движение (Spot)** | `$D_{min} = Fee_{in} + Fee_{out} + Slippage + Buffer$` | `Fee=0.001`, `Slippage=0.0003`, `Buffer=0.0003` |
-| **Мин. движение (Futures)** | `$D_{min} = (Fee_{in} + Fee_{out} + Slippage) \times Lev + Buffer$` | `Fee=0.00055`, `Lev=10`, `Buffer=0.0003` |
+| **Мин. движение (Spot)** | `$D_{min\_net} = fee_{round\_trip\_spot} + profit\_buffer$` | §6.3; ≈ 0.28% VIP0 |
+| **Мин. движение (Futures)** | `$D_{min\_net} = fee_{round\_trip\_futures} + profit\_buffer$` | §6.3; ≈ 0.19% VIP0; **без ×Lev** |
 | **Ожидаемое движение** | `$D_{exp} = \alpha \cdot \|Z\| \cdot \sigma + \beta \cdot \|Vel\| \cdot \Delta t$` | `α=0.4`, `β=0.6`, `Δt=0.3` с |
-| **Вход Long** | `D_exp ≥ D_min` ∧ `\|Z\| ≥ Z_threshold` ∧ `Vel > velocity_min` ∧ `EMA_50 > EMA_200` | см. regime matrix |
-| **Вход Short** | `D_exp ≥ D_min` ∧ `\|Z\| ≥ Z_threshold` ∧ `Vel < −velocity_min` ∧ `EMA_50 < EMA_200` | см. regime matrix |
+| **Вход Long** | `D_exp ≥ D_min_net` ∧ `\|Z\| ≥ Z_threshold` ∧ `Vel > velocity_min` ∧ `EMA_50 > EMA_200` | см. regime matrix |
+| **Вход Short** | `D_exp ≥ D_min_net` ∧ `\|Z\| ≥ Z_threshold` ∧ `Vel < −velocity_min` ∧ `EMA_50 < EMA_200` | см. regime matrix |
 | **Regime matrix** | | |
 | — Range (0) | Long ✓, Short ✓ | |
 | — Transition (1) | Long ✓, Short ✓ | |
@@ -448,6 +614,163 @@ K_tp_trail = clamp(base_tp_trail_atr × (1 + 0.1 × |Z|), 0.8, 1.5)
 - Ротация ключей: раз в 30 дней через CI/CD.
 - Конфиг: `.toml` не коммитится; AWS Parameter Store / env.
 
+### 8.5. Панель управления (Control Panel)
+
+Отдельный сервис **`control-panel`** на Executor (Сингапур) или выделенном admin-хосте в той же VPC. Назначение — операторское управление капиталом, парами и мониторинг профита **без правки конфигов вручную на сервере**.
+
+#### 8.5.1. Общие требования
+
+| Параметр | Спецификация |
+|----------|--------------|
+| **Доступ** | HTTPS (TLS), Basic Auth или JWT; bind только на private IP / VPN / SSH-tunnel. Публичный интернет без mTLS **запрещён**. |
+| **Обновление UI** | WebSocket push каждые 1–2 с (позиции, PnL, статус пар); REST — для мутаций. |
+| **Hot path** | Панель **не участвует** в hot path Risk Engine и исполнении ордеров. Все команды — async через command queue Executor. |
+| **Аудит** | Каждое изменение (allocation, enable/disable pair) → `tracing` event + append-only audit log. |
+
+#### 8.5.2. Распределение капитала по парам (% от депозита Spot / Futures)
+
+**Spot и Futures — разные кошельки (§6.0).** Allocation задаётся **отдельно** для каждого типа счёта.
+
+| Поле | Применимо к | Смысл |
+|------|-------------|-------|
+| `spot_alloc_pct` | `instrument = "spot"` | % от **spot equity** (USDT на спот-счёте) |
+| `futures_alloc_pct` | `instrument = "futures"` | % от **futures equity** (маржа USDT Perpetual) |
+
+- Единица: доля (`0.10` = 10%). Сумма `spot_alloc_pct` по всем enabled spot-парам ≤ `1.0`. Сумма `futures_alloc_pct` по enabled futures-парам ≤ `1.0`. Остаток — резерв на соответствующем кошельке.
+- Одна пара = один instrument (spot **или** futures), не оба одновременно.
+- Изменение allocation:
+  - **Без открытой позиции** — немедленно; warm path ≤ 500 ms.
+  - **С открытой позицией** — только для следующего входа.
+- Размер позиции: `Qty = WalletEquity × AllocPct × Risk% / (ATR × Multiplier)` (§6.1).
+- Валидация: `0 < alloc_pct ≤ 0.25` на пару в рамках своего кошелька.
+
+**Dashboard в UI — два блока:**
+
+```
+┌─ SPOT ─────────────────────────────┐  ┌─ FUTURES ──────────────────────────┐
+│ Equity: 300 USDT                     │  │ Equity: 200 USDT                   │
+│ Allocated: 65%  Free: 35%            │  │ Allocated: 80%  Free: 20%          │
+│ Net PnL today: +2.1 USDT (+0.7%)     │  │ Net PnL today: +4.3 USDT (+2.1%)   │
+│ [Stop new entries] [Cancel all orders]│  │ [Stop new entries] [Cancel all orders]│
+└──────────────────────────────────────┘  └────────────────────────────────────┘
+```
+
+**Таблица пар (фрагмент):**
+
+| Пара | Type | Enabled | Alloc % | Wallet | Net PnL | Pos |
+|------|------|---------|---------|--------|---------|-----|
+| BTCUSDT | Futures | ✓ | 20% | Futures 200 | +1.2% | Long |
+| ETHUSDT | Spot | ✓ | 15% | Spot 300 | +0.4% | — |
+| SOLUSDT | Futures | ⏸ | 10% | Futures 200 | — | — |
+
+#### 8.5.3. Добавление и остановка пар
+
+| Действие | Поведение |
+|----------|-----------|
+| **Add pair** | Символ + `instrument` (spot/futures) + `spot_alloc_pct` или `futures_alloc_pct`. Observer: `SubscribeSymbol`. SLA ≤ 30 с. |
+| **Stop pair (disable)** | `enabled = false` для пары. **Новые входы** блокируются (`PAUSE_OK`-аналог на уровне пары). Открытая позиция **не закрывается** автоматически — Position Manager продолжает SL/TP. Observer: `UnsubscribeSymbol` после подтверждения «нет позиции» или по явной галочке «force stop + close» (эквивалент `/flush` только для этой пары). |
+| **Remove pair** | Только если `enabled = false` и нет позиции. Запись удаляется из runtime-конфига; Observer отписывается. |
+| **Лимит whitelist** | 20–35 пар; при попытке добавить сверх лимита — ошибка UI. |
+
+> **Согласование с §3.1:** автоматическая подписка/отписка без оператора по-прежнему запрещена; панель — единственный легитимный канал изменения состава пар.
+
+#### 8.5.4. Отображение профита (Profit)
+
+Панель обязана показывать:
+
+| Метрика | Описание | Обновление |
+|---------|----------|------------|
+| **Unrealized PnL (net)** | После estimated fees | WebSocket 1–2 с |
+| **Realized PnL (session, net)** | Закрытые сделки минус fees | По fill |
+| **Realized PnL (today / 24h, net)** | Календарные сутки UTC | REST + WS |
+| **Realized PnL (total, net)** | С `initial_spot_deposit` + `initial_futures_deposit` (§10.1) | REST |
+| **Gross vs Net** | Обе колонки; **Net — primary** (§6.3) | REST |
+| **Profit by pair** | realized + unrealized net, win-rate, fees, slippage | REST |
+| **Equity curve** | Spot и Futures **отдельные** графики | REST |
+| **Fees paid** | Spot fees / Futures fees раздельно | REST |
+
+Формат отображения: USDT (абсолют) и **% от депозита** (§1.3, `pnl_pct`). Цветовая индикация: profit ≥ 0 — зелёный; DD > порога §6.2 — красный баннер.
+
+#### 8.5.5. REST API (минимальный контракт)
+
+```
+GET  /api/v1/dashboard                    → spot/futures equity, alloc, net_pnl, pairs[]
+GET  /api/v1/pairs                        → enabled, spot_alloc_pct | futures_alloc_pct
+POST /api/v1/pairs                          → { symbol, instrument, alloc_pct, leverage? }
+PATCH /api/v1/pairs/{id}                  → { enabled?, spot_alloc_pct?, futures_alloc_pct? }
+DELETE /api/v1/pairs/{id}
+GET  /api/v1/profit?period=24h&wallet=spot|futures|all
+GET  /api/v1/positions?wallet=spot|futures|all
+POST /api/v1/positions/{id}/close
+POST /api/v1/trading/halt                 → { wallet: "spot"|"futures"|"all", halt_entries: true }
+POST /api/v1/trading/resume               → { wallet: "spot"|"futures"|"all" }
+POST /api/v1/orders/cancel-all            → { wallet: "spot"|"futures" }  # снять все открытые ордера
+POST /api/v1/positions/close-all          → { wallet: "spot"|"futures", confirm: true }  # опционально
+WS   /ws/v1/stream
+```
+
+#### 8.5.6. Конфигурация
+
+```toml
+[control_panel]
+enabled = true
+bind_addr = "127.0.0.1:8080"       # только private; nginx reverse proxy опционально
+auth_mode = "jwt"                   # "basic" | "jwt"
+jwt_secret_env = "PANEL_JWT_SECRET"
+default_spot_alloc_pct = 0.05
+default_futures_alloc_pct = 0.05
+max_pair_alloc_pct = 0.25
+ws_push_interval_ms = 2000
+audit_log_path = "/var/log/bot/panel_audit.jsonl"
+```
+
+Расширение `symbols.toml`:
+
+```toml
+[[symbol]]
+id = 2
+binance = "ETHUSDT"
+bybit = "ETHUSDT"
+instrument = "spot"
+spot_margin_enabled = false
+enabled = true
+spot_alloc_pct = 0.15               # только для instrument = "spot"
+# futures_alloc_pct = 0.20          # только для instrument = "futures"
+```
+
+#### 8.5.7. Метрики Prometheus (дополнение к §8.2)
+
+- `panel_pair_enabled{symbol}` — 0/1
+- `panel_spot_alloc_pct{symbol}`, `panel_futures_alloc_pct{symbol}`
+- `profit_net_usdt{wallet="spot"|"futures"}`
+- `halt_entries_active{wallet="spot"|"futures"}`
+
+#### 8.5.8. Связь с Telegram (§10.3)
+
+Telegram — мобильные алерты; панель — основной UI. `/status` — краткая сводка Spot/Futures отдельно.
+
+#### 8.5.9. Остановка торговли и снятие ордеров (Spot / Futures раздельно)
+
+Оператор должен иметь **независимый контроль** над Spot и Futures.
+
+| Команда (панель / API) | Spot | Futures | Эффект |
+|------------------------|------|---------|--------|
+| **Stop new entries** | `halt_entries_spot = true` | `halt_entries_futures = true` | Блок новых входов; **открытые позиции** продолжают SL/TP (§5.4) |
+| **Resume entries** | `halt_entries_spot = false` | `halt_entries_futures = false` | Снятие блокировки входов |
+| **Cancel all orders** | `POST .../orders/cancel-all?wallet=spot` | `...wallet=futures` | Отмена **всех** открытых ордеров на счёте (limit, stop, conditional). Позиции **не закрываются** |
+| **Close all positions** (опционально, confirm) | spot only | futures only | Market close всех позиций + cancel orders |
+| **Stop ALL** | оба флага halt | | + cancel all orders на обоих счетах |
+
+**Cancel all orders — детали:**
+- Spot: `POST /v5/order/cancel-all` (`category=spot`).
+- Futures: `POST /v5/order/cancel-all` (`category=linear`).
+- Включает: pending limits, conditional. **Exchange stop-loss (§4.5) тоже снимается.**
+- **Обязательно после cancel:** если есть открытая spot-позиция → auto **re-place exchange stop** по `effective_SL` (§5.5) в течение 2 с; UI-предупреждение + Telegram «stop restored».
+- Futures: после cancel re-place `Stop-Market` по `effective_SL` (§5.1).
+- **Не путать** с «stop pair» (§8.5.3): halt блокирует только **новые** входы.
+
+**UI:** две кнопки на каждый кошелёк — «⏸ Stop new bets» и «✕ Cancel all orders»; статус `HALTED` / `ACTIVE` в dashboard.
+
 ---
 
 ## 9. Тестирование, валидация и развертывание
@@ -460,12 +783,19 @@ K_tp_trail = clamp(base_tp_trail_atr × (1 + 0.1 × |Z|), 0.8, 1.5)
 | SL/TP state machine | proptest порогов | Monotonic SL/TP; порядок 0.15→0.30→TP-0 |
 | Network Simulation | `tc netem` (delay 50ms jitter 5ms loss 0.1%) | Safe-Mode; gap storm pause; ордера не дублируются |
 | Replay Engine | Симулятор на `.bin` логах | TCA: slippage, fees, latency; PF ≥ 1.2 для live |
-| Paper Trading | Bybit Testnet + Binance Futures Testnet | ≥ 100 сделок Futures + Spot Long, DD < 1% |
+| **Latency replay** | Inject `injected_latency_ms = 150` | **Follow-through rate ≥ 40%**: доля сигналов, где Bybit движется в сторону `direction_bias` в окне 300 ms после delayed entry |
+| Paper Trading | Bybit Testnet + Binance Futures Testnet | ≥ 100 сделок **Futures**; Spot — только после futures PF ≥ 1.3; DD < 1% |
 | Live Staged | 1% депозита | 7 дней без критических ошибок |
+| **Control Panel** | API + UI e2e | Spot/Futures alloc раздельно; halt entries spot ≠ futures; cancel-all orders; net PnL после fees |
+| **Fee edge** | Unit + replay | Сделки с `D_exp < D_min_net` не открываются; BE включает fees |
+| **Binance-adaptive SL/TP** | Replay + proptest | `effective_SL` монотонен; ≥ fee-BE; §5.5 |
+| **Safe-Mode phased** | Integration | Фаза 1 не закрывает; фаза 3 закрывает все |
+| **Cancel + restore stop** | Integration | После cancel-all exchange stop восстановлен ≤ 2 s |
+| **MVP mono-node** | §2.4 deploy | 3–5 futures pairs; spot disabled; PF paper ≥ 1.2 |
 
 ### 9.2. CI/CD и развертывание
 - Pipeline: GitHub Actions → fmt → clippy → test → release → S3 → SSH deploy.
-- Сервисы: `systemd` (`observer.service`, `executor.service`, `telegram-alerts.service`).
+- Сервисы: `systemd` (`bot-mvp.service` **или** `observer.service` + `executor.service`, `telegram-alerts.service`, `control-panel.service`).
 - Конфиг: `/etc/bot/config.toml`, `/etc/bot/symbols.toml`.
 - Rollback: документирован в Runbook.
 
@@ -476,9 +806,31 @@ K_tp_trail = clamp(base_tp_trail_atr × (1 + 0.1 × |Z|), 0.8, 1.5)
 ### 10.1. `config.toml` (единый, без дубликатов секций)
 ```toml
 [capital]
-initial_deposit_usdt = 500.0
+initial_spot_deposit_usdt = 300.0
+initial_futures_deposit_usdt = 200.0
 risk_per_trade_pct = 0.01
-slot_count = 5
+
+[fees]
+spot_maker_pct = 0.001
+spot_taker_pct = 0.001
+futures_maker_pct = 0.0002
+futures_taker_pct = 0.00055
+fee_profit_buffer_pct = 0.0003      # мин. edge поверх round-trip fees
+
+[deployment]
+mode = "mvp"                          # "mvp" | "production"
+spot_enabled = false                  # true только после futures PF ≥ min_futures_pf_for_spot
+min_futures_pf_for_spot = 1.3
+mvp_futures_pairs = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+[safe_mode]
+heartbeat_miss_caution = 1            # фаза 1: halt entries
+heartbeat_miss_defensive = 3          # фаза 2: SL → fee-BE
+heartbeat_miss_emergency = 5          # фаза 3: close all
+heartbeat_emergency_timeout_ms = 500
+
+[spot]
+spot_min_tp_pct = 0.008               # min TP для spot (0.8%); выше futures default
 
 [execution]
 default_leverage_futures = 10
@@ -503,7 +855,7 @@ enabled = true
 initial_target_pct = 0.005           # TP-0: +0.5% — partial close
 partial_close_pct = 0.5
 trail_arm_pct = 0.003                # PnL ≥ 0.3%: TrailArm (до partial)
-sl_breakeven_pct = 0.003             # PnL ≥ 0.3%: SL → Entry
+sl_breakeven_pct = 0.003             # PnL ≥ 0.3%: SL → fee-BE (§6.3)
 sl_tighten_pct = 0.0015              # PnL ≥ 0.15%: SL-1
 base_tp_trail_atr = 1.0
 extended_trend_tp = true             # TP-Extended: только Futures
@@ -563,6 +915,17 @@ telegram_bot_token = "${TELEGRAM_BOT_TOKEN}"
 telegram_chat_id = "${TELEGRAM_CHAT_ID}"
 prometheus_endpoint = "/metrics"
 
+[control_panel]
+enabled = true
+bind_addr = "127.0.0.1:8080"
+auth_mode = "jwt"
+jwt_secret_env = "PANEL_JWT_SECRET"
+default_spot_alloc_pct = 0.05
+default_futures_alloc_pct = 0.05
+max_pair_alloc_pct = 0.25
+ws_push_interval_ms = 2000
+audit_log_path = "/var/log/bot/panel_audit.jsonl"
+
 [whitelist]
 pairs = [
   "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT",
@@ -580,6 +943,8 @@ binance = "BTCUSDT"
 bybit = "BTCUSDT"
 instrument = "futures"
 leverage = 10
+enabled = true
+futures_alloc_pct = 0.20
 
 [[symbol]]
 id = 2
@@ -587,6 +952,8 @@ binance = "ETHUSDT"
 bybit = "ETHUSDT"
 instrument = "spot"
 spot_margin_enabled = false   # Long only; Short → RISK_SKIP
+enabled = true
+spot_alloc_pct = 0.15
 
 [[symbol]]
 id = 3
@@ -594,6 +961,8 @@ binance = "SOLUSDT"
 bybit = "SOLUSDT"
 instrument = "futures"
 leverage = 5
+enabled = true
+futures_alloc_pct = 0.10
 
 # Пример Spot Margin (опционально):
 # [[symbol]]
@@ -605,10 +974,11 @@ leverage = 5
 ```
 
 ### 10.3. Telegram-бот (Executor)
-- `/status` → Позиции, PnL, Latency, Mode, RiskFlags
-- `/pause` → Блокировка новых входов
-- `/resume` → Снятие блокировки
-- `/flush` → Экстренное закрытие всех позиций + полный стоп
+- `/status` → Spot/Futures equity, net PnL, позиции, Latency, halt-флаги
+- `/pause spot` / `/pause futures` / `/pause all` → Stop new entries (§8.5.9)
+- `/resume spot` / `/resume futures` / `/resume all`
+- `/cancel spot` / `/cancel futures` → Cancel all orders на счёте (позиции не закрываются)
+- `/flush spot` / `/flush futures` / `/flush all` → Close all positions + cancel orders + halt
 
 ### 10.4. Структуры данных (Rust)
 ```rust
@@ -663,19 +1033,22 @@ pub struct BybitExitMetrics {
     pub ema_50: f64,
     pub ema_200: f64,
     pub mid: f64,
+    pub volume_delta_100ms: f32,   // MICRO_OK filter (§4.2)
 }
 ```
 
 ### 10.5. Порядок внедрения (спринты)
 | Спринт | Модуль | Зависимости |
 |--------|--------|-------------|
-| 1 | `.bin` лог + Tick-Replay | postcard, tokio, memmap2 |
+| **0** | **MVP mono-node** §2.4: in-process Observer+Executor, 3 futures pairs, replay + paper | — |
+| 1 | `.bin` лог + Tick-Replay + latency inject 150 ms | postcard, tokio, memmap2 |
 | 2 | Observer: WS + парсинг + RingBuffer + Entry Engine §7 | simd-json, zenoh |
 | 3 | Executor: Risk hot/warm + Bybit connectors | Bybit V5 WS |
 | 4 | SL/TP state machine §5.0 + partial close + Spot fail-safe | PositionState |
 | 5 | Dynamic Z_threshold + Regime matrix | §3.3, config |
 | 6 | Funding/Basis warm cache + gap storm policy | Bybit REST |
 | 7 | Bybit exit EMA + Paper → Live staged | Runbook, Telegram |
+| 8 | Control Panel §8.5: REST/WS API, allocation, pair enable/disable, profit dashboard | axum, Executor command queue |
 
 ---
 
@@ -738,3 +1111,53 @@ pub struct BybitExitMetrics {
 | 14 | Нет политики UDP gap | §2.2: gap storm → pause 5 s |
 | 15 | Нет единиц Velocity/PnL | §1.3: таблица единиц |
 | 16 | `packet_version = 1`, не хватало полей | `packet_version = 2`: `entry_valid`, `d_exp`, `d_min`, `sigma`, `z_threshold_used` |
+
+---
+
+## 14. Изменения v1.3 → v1.4
+
+| # | Добавлено | Описание |
+|---|-----------|----------|
+| 1 | §8.5 Панель управления | Веб-UI + REST/WebSocket API на Executor |
+| 2 | `capital_alloc_pct` | Распределение капитала по парам в % от депозита |
+| 3 | Enable / disable / add / remove pair | Операторское управление составом whitelist в runtime |
+| 4 | Profit dashboard | Realized / unrealized PnL, по парам, equity curve, fees |
+| 5 | `[control_panel]` в config.toml | Параметры сервиса панели |
+| 6 | `enabled`, `capital_alloc_pct` в symbols.toml | Состояние и лимит капитала на пару |
+| 7 | Спринт 8 | Внедрение Control Panel |
+| 8 | Whitelist §1 | Runtime-изменение пар только через панель (не произвольная подписка) |
+
+---
+
+## 15. Изменения v1.4 → v1.5
+
+| # | Добавлено / изменено | Описание |
+|---|----------------------|----------|
+| 1 | **Главная цель** §1 | Рост депозита; SL/TP по Binance; запрет сделок «минус комиссия» |
+| 2 | §5.4 | Адаптивное поднятие SL/TP по Z, Vel, ATR, regime с Binance |
+| 3 | §6.0 | **Раздельные депозиты** Spot и Futures (разные кошельки Bybit) |
+| 4 | §6.3 | Fee-aware sizing: `D_min_net`, fee-BE, net PnL в панели |
+| 5 | §8.5.2 | `spot_alloc_pct` / `futures_alloc_pct` — % от **своего** кошелька |
+| 6 | §8.5.9 | Stop new entries + cancel all orders — **Spot и Futures раздельно** |
+| 7 | `[fees]` config | Комиссии maker/taker для расчёта edge |
+| 8 | Risk flags | `ENTRIES_SPOT_OK`, `ENTRIES_FUTURES_OK`, `FEE_EDGE_OK` |
+| 9 | API | `/trading/halt`, `/orders/cancel-all` с `wallet=spot\|futures` |
+
+---
+
+## 16. Изменения v1.5 → v1.6
+
+| # | Исправлено / добавлено | Описание |
+|---|------------------------|----------|
+| 1 | **D_min_net** §6.3, §7 | Убрано ошибочное `× Lev` для комиссий; fees от notional |
+| 2 | §5.5 `effective_SL` | `max(sl_pnl, sl_binance, sl_fee_be)` — единый SL |
+| 3 | fee-BE | Унифицирован во всех таблицах §5.0, §5.3 (убран «Entry BE») |
+| 4 | `MICRO_OK` §4.2 | Фильтр по `bybit_volume_delta_100ms`, не Binance |
+| 5 | §5.2.1 Safe-Mode | 3 фазы: halt → tighten SL → emergency close |
+| 6 | §8.5.9 + §4.5 | cancel-all → auto re-place exchange stop ≤ 2 s |
+| 7 | §2.4 MVP mono-node | Обязательный этап; spot disabled; 3–5 futures |
+| 8 | §1.3, §1 | Явная цепочка Binance→Bybit; momentum (не lag-arb) |
+| 9 | §6.0 Spot policy | Futures-first; spot_min_tp_pct 0.8%; PF gate 1.3 |
+| 10 | §9.1 | Replay follow-through ≥ 40% @ 150 ms delay |
+| 11 | `[deployment]`, `[safe_mode]`, `[spot]` config | Новые секции config.toml |
+| 12 | `BybitExitMetrics.volume_delta_100ms` | Warm path microstructure |
