@@ -167,11 +167,45 @@ async def sampler_loop(
         await asyncio.sleep(SAMPLE_MS / 1000)
 
 
+def flush_rows_to_disk(states: Dict[str, SymbolState], output_dir: Path, tag: str) -> int:
+    """Write buffered rows to parquet and clear buffers (keeps WS + pending impulses state)."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    total = 0
+    for sym, st in states.items():
+        if not st.rows:
+            continue
+        df = pd.DataFrame(st.rows)
+        out = output_dir / f"{sym}_{stamp}_{tag}.parquet"
+        df.to_parquet(out, index=False)
+        total += len(df)
+        print(f"Flushed {len(df)} rows -> {out}")
+        st.rows.clear()
+    return total
+
+
+async def flush_loop(
+    states: Dict[str, SymbolState],
+    output_dir: Path,
+    flush_interval_sec: int,
+    stop_event: asyncio.Event,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=flush_interval_sec)
+            break
+        except asyncio.TimeoutError:
+            n = flush_rows_to_disk(states, output_dir, tag="checkpoint")
+            if n:
+                print(f"[checkpoint] flushed {n} rows total")
+
+
 async def run_collector(
     symbols: List[str],
     output_dir: Path,
     duration_sec: Optional[int],
     impulse_min_bps: float,
+    flush_interval_sec: Optional[int],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     states = {s: SymbolState(symbol=s) for s in symbols}
@@ -191,6 +225,11 @@ async def run_collector(
         asyncio.create_task(bybit_loop(symbols, states)),
         asyncio.create_task(sampler_loop(states, impulse_min_bps, stop)),
     ]
+    if flush_interval_sec and flush_interval_sec > 0:
+        tasks.append(
+            asyncio.create_task(flush_loop(states, output_dir, flush_interval_sec, stop))
+        )
+        print(f"Checkpoint flush every {flush_interval_sec}s -> {output_dir}")
 
     start = time.time()
     while not stop.is_set():
@@ -203,13 +242,9 @@ async def run_collector(
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    for sym, st in states.items():
-        if not st.rows:
-            continue
-        df = pd.DataFrame(st.rows)
-        out = output_dir / f"{sym}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.parquet"
-        df.to_parquet(out, index=False)
-        print(f"Wrote {len(df)} rows -> {out}")
+    n = flush_rows_to_disk(states, output_dir, tag="final")
+    if n == 0:
+        print("No rows to flush on shutdown")
 
 
 def main() -> None:
@@ -218,9 +253,21 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("research/data"))
     parser.add_argument("--duration-sec", type=int, default=None, help="Stop after N seconds")
     parser.add_argument("--impulse-min-bps", type=float, default=5.0)
+    parser.add_argument(
+        "--flush-interval-sec",
+        type=int,
+        default=3600,
+        help="Write buffered rows to disk every N seconds (0 = only on exit)",
+    )
     args = parser.parse_args()
     asyncio.run(
-        run_collector(args.symbols, args.output, args.duration_sec, args.impulse_min_bps)
+        run_collector(
+            args.symbols,
+            args.output,
+            args.duration_sec,
+            args.impulse_min_bps,
+            args.flush_interval_sec,
+        )
     )
 
 

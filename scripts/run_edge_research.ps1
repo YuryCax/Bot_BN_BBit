@@ -3,6 +3,7 @@
 
 param(
     [int]$DurationSec = 604800,
+    [int]$FlushIntervalSec = 3600,
     [string[]]$Symbols = @("BTCUSDT", "ETHUSDT"),
     [string]$Output = "research/data"
 )
@@ -18,7 +19,8 @@ Write-Host "Starting Edge Research collector for $DurationSec sec..."
 & $python research/collector/collector.py `
     --symbols $Symbols `
     --output $Output `
-    --duration-sec $DurationSec
+    --duration-sec $DurationSec `
+    --flush-interval-sec $FlushIntervalSec
 
 Write-Host "Running analyze..."
 & $python research/edge_report/analyze.py --data-dir $Output

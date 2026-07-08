@@ -9,7 +9,7 @@ Live is **forbidden** while `config/edge_profile.toml` has `status = "pending"` 
 1. **Collect** (1–2 weeks, 2–3 futures pairs)
    - `binance_mid`, `bybit_mid` every 100 ms
    - `impulse_bps_100ms`, forward returns Bybit at +200/+500/+1000 ms
-   - Output: `research/data/*.parquet`
+   - Output: `research/data/*.parquet` (hourly checkpoints + final flush)
 
 2. **Analyze**
    - Follow-through rate by `(symbol, hour_utc, vol_bucket)`
