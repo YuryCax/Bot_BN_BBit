@@ -1,0 +1,56 @@
+{
+  "notionals_usd": [
+    1000.0,
+    3000.0
+  ],
+  "fee_bybit_rt_bps": 11.0,
+  "fee_buffer_bps": 3.0,
+  "method": "event",
+  "symbols": {
+    "BTCUSDT": {
+      "max_slippage_pct": 5.2e-05,
+      "max_slippage_bps": 0.52,
+      "max_adverse_move_bps": 15.0,
+      "lag_min_bps": 3.0,
+      "follow_through_min": 0.521,
+      "trade_hours_utc": [],
+      "net_edge_bps": -9.42,
+      "gross_mid_bps_best_hour": 2.1,
+      "ccf_best_lag_ms": 0,
+      "enabled_candidate": false,
+      "method": "event",
+      "coverage": {
+        "symbol": "BTCUSDT",
+        "bn_rows": 13833143,
+        "by_rows": 21822040,
+        "overlap_hours": 360.0,
+        "bn_span_h": 360.0,
+        "by_span_h": 360.0
+      }
+    },
+    "ETHUSDT": {
+      "max_slippage_pct": 5.2e-05,
+      "max_slippage_bps": 0.52,
+      "max_adverse_move_bps": 15.0,
+      "lag_min_bps": 3.0,
+      "follow_through_min": 0.534,
+      "trade_hours_utc": [],
+      "net_edge_bps": -9.72,
+      "gross_mid_bps_best_hour": 1.8,
+      "ccf_best_lag_ms": 0,
+      "enabled_candidate": false,
+      "method": "event",
+      "coverage": {
+        "symbol": "ETHUSDT",
+        "bn_rows": 12869283,
+        "by_rows": 29911522,
+        "overlap_hours": 360.0,
+        "bn_span_h": 360.0,
+        "by_span_h": 360.0
+      }
+    }
+  },
+  "research_method_detail": "l2_vwap_event",
+  "status": "fail",
+  "period_days": 15
+}

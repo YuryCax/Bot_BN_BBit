@@ -27,7 +27,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: install deps
+      - name: install collector deps
         run: pip install -r research/collector/requirements.txt
-      - name: edge analysis synthetic
-        run: python research/edge_report/analyze.py --synthetic
+      - name: edge analysis synthetic (mid-only)
+        run: python research/edge_report/analyze.py --synthetic --data-dir /tmp/edge_mid --output-profile /tmp/mid_profile.toml --output-summary /tmp/mid_summary.md
+      - name: install quant deps
+        run: pip install -r research/quant/requirements.txt
+      - name: phase 0.5 quant hardening (synthetic L2)
+        run: |
+          python research/quant/download_hist.py --days 1 --output /tmp/hist --synthetic
+          python research/quant/analyze_lead_lag.py --hist-dir /tmp/hist --notional-usd 1000 \
+            --output-profile /tmp/edge_profile.toml \
+            --output-summary /tmp/summary.md \
+            --output-params /tmp/params.json \
+            --symbols-toml config/symbols.toml

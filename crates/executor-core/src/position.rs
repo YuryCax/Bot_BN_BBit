@@ -57,17 +57,64 @@ impl PositionManager {
         if pos.side == Side::Long && packet.velocity < 0.0 && packet.direction_bias <= 0 {
             return Some(ExitReason::Invalidation);
         }
-        if pos.side == Side::Long && bybit_mid <= pos.current_stop {
-            return Some(ExitReason::StopLoss);
+        if pos.side == Side::Short && packet.velocity > 0.0 && packet.direction_bias >= 0 {
+            return Some(ExitReason::Invalidation);
         }
-        if pos.side == Side::Long && bybit_mid >= pos.current_tp {
-            return Some(ExitReason::TakeProfit);
+        if pos.current_stop > 0.0 {
+            if pos.side == Side::Long && bybit_mid <= pos.current_stop {
+                return Some(ExitReason::StopLoss);
+            }
+            if pos.side == Side::Short && bybit_mid >= pos.current_stop {
+                return Some(ExitReason::StopLoss);
+            }
+        }
+        if pos.current_tp > 0.0 {
+            if pos.side == Side::Long && bybit_mid >= pos.current_tp {
+                return Some(ExitReason::TakeProfit);
+            }
+            if pos.side == Side::Short && bybit_mid <= pos.current_tp {
+                return Some(ExitReason::TakeProfit);
+            }
         }
         None
     }
 
     pub fn fee_be_long(&self, entry: f64) -> f64 {
         entry * self.fee_be_long_mult
+    }
+
+    /// Initial local SL/TP from ATR (or pct fallback) at open.
+    pub fn initial_stops(
+        &self,
+        side: Side,
+        entry: f64,
+        atr: f32,
+        atr_mult_sl: f64,
+        tp_pct: f64,
+    ) -> (f64, f64) {
+        let atr_abs = if atr > 0.0 {
+            atr as f64
+        } else {
+            entry * 0.003
+        };
+        let sl_dist = atr_abs * atr_mult_sl;
+        let tp_dist = entry * tp_pct.max(0.001);
+        match side {
+            Side::Long => {
+                let mut sl = entry - sl_dist;
+                if sl >= entry {
+                    sl = entry * 0.997;
+                }
+                (sl, entry + tp_dist)
+            }
+            Side::Short => {
+                let mut sl = entry + sl_dist;
+                if sl <= entry {
+                    sl = entry * 1.003;
+                }
+                (sl, (entry - tp_dist).max(entry * 0.001))
+            }
+        }
     }
 }
 
@@ -109,6 +156,43 @@ mod tests {
         assert_eq!(
             pm.check_exit(&pos, 100.5, &pkt, 1_000_000_000),
             Some(ExitReason::LagConvergence)
+        );
+    }
+
+    #[test]
+    fn initial_stops_long_below_entry() {
+        let pm = PositionManager::default();
+        let (sl, tp) = pm.initial_stops(Side::Long, 100.0, 1.0, 1.8, 0.005);
+        assert!(sl < 100.0);
+        assert!(tp > 100.0);
+    }
+
+    #[test]
+    fn stop_loss_triggers_long() {
+        let pm = PositionManager::default();
+        let pos = PositionState {
+            id: "1".into(),
+            symbol_id: 1,
+            side: Side::Long,
+            instrument: InstrumentType::Futures,
+            entry_price: 100.0,
+            qty: 1.0,
+            qty_remaining: 1.0,
+            current_stop: 99.0,
+            current_tp: 105.0,
+            sl_phase: 0,
+            tp_phase: 0,
+            partial_done: false,
+            pnl_pct: 0.0,
+            open_time_ns: 0,
+            entry_impulse_bps: 10.0,
+            lag_capture_ratio: 0.0,
+            exchange_stop_id: None,
+        };
+        let pkt = MarketStatePacket::neutral(1, 1, 1);
+        assert_eq!(
+            pm.check_exit(&pos, 98.5, &pkt, 1_000_000),
+            Some(ExitReason::StopLoss)
         );
     }
 }

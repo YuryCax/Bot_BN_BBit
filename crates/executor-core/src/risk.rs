@@ -47,6 +47,10 @@ impl RiskFlags {
         Self(bits)
     }
 
+    pub fn with_cleared(self, flag: u64) -> Self {
+        Self(self.0 & !flag)
+    }
+
     pub fn all_required_futures(self) -> bool {
         self.contains_all(Self::ALL_FUTURES)
     }
@@ -68,10 +72,14 @@ pub enum RiskDecision {
     Skip,
     Stale,
     Duplicate,
+    /// Bybit already caught up past max_adverse_move_bps — edge gone.
+    AdverseMoveExceeded,
 }
 
 pub struct RiskEngine {
     pub max_latency_ns: u64,
+    /// Max allowed Bybit move vs Binance signal ref (bps). Must be > lag_min.
+    pub max_adverse_move_bps: f32,
     last_seq: [u32; shared::registry::MAX_SYMBOLS],
 }
 
@@ -79,12 +87,20 @@ impl Default for RiskEngine {
     fn default() -> Self {
         Self {
             max_latency_ns: 150_000_000,
+            max_adverse_move_bps: 15.0,
             last_seq: [0; shared::registry::MAX_SYMBOLS],
         }
     }
 }
 
 impl RiskEngine {
+    pub fn adverse_move_bps(ref_price: f64, bybit_mid: f64) -> f32 {
+        if ref_price <= 0.0 || bybit_mid <= 0.0 {
+            return f32::MAX;
+        }
+        (((bybit_mid - ref_price) / ref_price).abs() * 10_000.0) as f32
+    }
+
     pub fn check_entry(&mut self, packet: &MarketStatePacket) -> RiskDecision {
         if packet.entry_valid == 0 {
             return RiskDecision::Skip;
@@ -108,6 +124,17 @@ impl RiskEngine {
         if packet.d_exp < packet.d_min {
             return RiskDecision::Skip;
         }
+
+        let bybit = if packet.bybit_mid_ref > 0.0 {
+            packet.bybit_mid_ref
+        } else {
+            packet.ref_price
+        };
+        let move_bps = Self::adverse_move_bps(packet.ref_price, bybit);
+        if move_bps > self.max_adverse_move_bps {
+            return RiskDecision::AdverseMoveExceeded;
+        }
+
         RiskDecision::Open
     }
 }
@@ -119,9 +146,43 @@ mod tests {
 
     #[test]
     fn rejects_entry_valid_zero() {
+        set_warm_flags(RiskFlags::all_futures());
         let mut re = RiskEngine::default();
         let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
         p.entry_valid = 0;
         assert_eq!(re.check_entry(&p), RiskDecision::Skip);
+    }
+
+    #[test]
+    fn rejects_over_adverse_move() {
+        set_warm_flags(RiskFlags::all_futures());
+        let mut re = RiskEngine {
+            max_adverse_move_bps: 5.0,
+            ..Default::default()
+        };
+        let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
+        p.entry_valid = 1;
+        p.ref_price = 100.0;
+        p.bybit_mid_ref = 100.1; // 10 bps
+        p.d_exp = 1.0;
+        p.d_min = 0.1;
+        assert_eq!(re.check_entry(&p), RiskDecision::AdverseMoveExceeded);
+    }
+
+    #[test]
+    fn accepts_open_lag_within_adverse() {
+        set_warm_flags(RiskFlags::all_futures());
+        // lag_min ~3 bps open is fine if adverse limit is 15
+        let mut re = RiskEngine {
+            max_adverse_move_bps: 15.0,
+            ..Default::default()
+        };
+        let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
+        p.entry_valid = 1;
+        p.ref_price = 100.0;
+        p.bybit_mid_ref = 99.96; // 4 bps — open lag, not caught up yet
+        p.d_exp = 1.0;
+        p.d_min = 0.1;
+        assert_eq!(re.check_entry(&p), RiskDecision::Open);
     }
 }

@@ -1,46 +1,52 @@
-# Edge Research (§9.0) — Phase 0
+# Edge Research (§9.0) + Phase 0.5 Quant Hardening (ТЗ v2.4)
 
-**Goal:** Prove `net_edge_bps > 0` after fees and 150 ms latency **before** any paper/live trading.
+**Goal:** Prove `net_edge_bps > 0` after fees, **forwarded Binance tick age ~150 ms**, and **L2 VWAP slippage** before paper/live.
 
-Live is **forbidden** while `config/edge_profile.toml` has `status = "pending"` or `net_edge_bps <= 0`.
+## Production pass rules (hard)
+
+`config/edge_profile.toml` may set `status = "pass"` **only if all** hold:
+
+| Rule | Requirement |
+|------|-------------|
+| `research_method` | `l2_vwap` |
+| `data_source` | `live` or `binance_vision` — **never** `synthetic` for production |
+| `research_period_days` | **≥ 14** |
+| Per symbol | `net_edge_bps > 0` and ≥3 positive `trade_hours_utc` |
+
+**Synthetic fixtures are for CI / offline tooling only.** They must write `status = "fail"` or `data_source = "synthetic"` so paper/live validation rejects them.
+
+## Slippage semantics
+
+| Field | Meaning | Used for |
+|-------|---------|----------|
+| `max_slippage_bps` / `book_slippage_bps` | L2 VWAP cost at target notional | Edge research, sizing |
+| `max_adverse_move_bps` | Max Bybit mid move vs signal ref after decide | Executor kill (not equal to book slip) |
+
+Using book VWAP (~0.5 bps) as the adverse-move kill incorrectly rejects every open-lag signal (`lag_min_bps ≥ 3`).
 
 ## Workflow
 
-1. **Collect** (1–2 weeks, 2–3 futures pairs)
-   - `binance_mid`, `bybit_mid` every 100 ms
-   - `impulse_bps_100ms`, forward returns Bybit at +200/+500/+1000 ms
-   - Output: `research/data/*.parquet` (hourly checkpoints + final flush)
+```powershell
+.\scripts\run_quant_hardening.ps1 -LiveDownload   # production candidate
+.\scripts\run_quant_hardening.ps1                 # synthetic → must not unlock live
+.\scripts\run_r1_research.ps1                     # R1: event-time + fee realism + sweep (existing hist)
+```
 
-2. **Analyze**
-   - Follow-through rate by `(symbol, hour_utc, vol_bucket)`
-   - Conditional return after impulse ≥ `impulse_min_bps`
-   - `net_edge_bps = conditional_return - fee_round_trip - slippage (0.05%)`
-   - Output: `research/edge_report/` (notebook, charts, summary.md)
+## R1 notes
 
-3. **Publish thresholds**
-   - Update `config/edge_profile.toml` with measured values
-   - Set `status = "pass"` only if ≥1 symbol has `net_edge_bps > 0` in ≥3 hourly windows
-
-## Go / No-Go
-
-| Pass | Fail |
-|------|------|
-| net_edge_bps > 0 on ≥1 pair | Stop or change pairs/hours |
-| edge_profile.toml generated | Do not start Rust paper bot |
-| trade_hours_utc from data | Do not guess follow_through_min |
-
-## Tools
-
-- Phase 0 collector: Python (recommended) or Observer §3.5 telemetry
-- Analysis: pandas + Jupyter
-- Inject latency 150 ms in replay before trusting live PF
+- Fee model: **Bybit-only** round-trip taker (~11 bps). Binance is signal-only.
+- Primary measure: **event-time asof** (`--method event`); bar-join kept for comparison.
+- Sweep output: `research/edge_report/sweep_heatmap.csv`, `sweep_report.md`.
+- Do **not** rent AWS dual-node for trading or set `mode=paper/live` while `status=fail`.
 
 ## Directory Layout
 
 ```
 research/
-├── README.md           # this file
-├── data/               # raw Parquet (gitignored)
-├── edge_report/        # analysis artifacts
-└── collector/          # (TODO) standalone collector script
+├── README.md
+├── data/               # mid collector parquet
+├── data/hist/          # Phase 0.5 hist trades/L2
+├── edge_report/        # summary, sweep, params_for_rust.json
+├── collector/          # mid collector §9.0
+└── quant/              # download_hist, ccf_lag, orderbook_sim, analyze_lead_lag, sweep_edge
 ```

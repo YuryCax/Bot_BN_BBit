@@ -18,6 +18,7 @@ serde_json = "1"
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
 simd-json = { workspace = true }
+observer-core = { path = "../observer-core" }
 
 [dev-dependencies]
 proptest = { workspace = true }

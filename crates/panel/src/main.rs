@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     extract::State,
     routing::{get, post},
@@ -5,13 +7,17 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use shared::config::AppConfig;
-use std::sync::Arc;
+use shared::packet::{OperatorAction, OperatorCommand};
+use shared::time::utc_now_ns;
+use shared::zenoh_ipc::ZenohPublisher;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone)]
 struct AppState {
     config: Arc<AppConfig>,
+    publisher: Arc<ZenohPublisher>,
+    halt: Arc<tokio::sync::Mutex<bool>>,
 }
 
 #[derive(Serialize)]
@@ -20,6 +26,7 @@ struct Dashboard {
     net_pnl_today: f64,
     pairs: Vec<PairRow>,
     halt_entries_futures: bool,
+    mode: String,
 }
 
 #[derive(Serialize)]
@@ -33,34 +40,70 @@ struct PairRow {
 struct HaltRequest {
     wallet: String,
     halt_entries: bool,
+    #[serde(default)]
+    flatten: bool,
+}
+
+async fn publish_cmd(st: &AppState, action: OperatorAction, source: &str) -> anyhow::Result<()> {
+    let cmd = OperatorCommand {
+        action,
+        ts_ns: utc_now_ns(),
+        source: source.into(),
+    };
+    st.publisher.publish_command(&cmd).await
 }
 
 async fn dashboard(State(st): State<AppState>) -> Json<Dashboard> {
+    let halt = *st.halt.lock().await;
     Json(Dashboard {
         futures_equity: st.config.capital.initial_futures_deposit_usdt,
         net_pnl_today: 0.0,
-        pairs: vec![
-            PairRow {
-                symbol: "BTCUSDT".into(),
+        pairs: st
+            .config
+            .deployment
+            .start_futures_pairs
+            .iter()
+            .map(|s| PairRow {
+                symbol: s.clone(),
                 enabled: true,
                 alloc_pct: 0.20,
-            },
-            PairRow {
-                symbol: "ETHUSDT".into(),
-                enabled: true,
-                alloc_pct: 0.20,
-            },
-        ],
-        halt_entries_futures: false,
+            })
+            .collect(),
+        halt_entries_futures: halt,
+        mode: st.config.deployment.mode.clone(),
     })
 }
 
-async fn halt_trading(Json(req): Json<HaltRequest>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "wallet": req.wallet,
-        "halt_entries": req.halt_entries,
-        "status": "queued"
-    }))
+async fn halt_trading(
+    State(st): State<AppState>,
+    Json(req): Json<HaltRequest>,
+) -> Json<serde_json::Value> {
+    let action = if req.flatten {
+        OperatorAction::FlattenAll
+    } else if req.halt_entries {
+        OperatorAction::HaltEntries
+    } else {
+        OperatorAction::ResumeEntries
+    };
+    match publish_cmd(&st, action, "panel").await {
+        Ok(()) => {
+            *st.halt.lock().await = req.halt_entries || req.flatten;
+            Json(serde_json::json!({
+                "wallet": req.wallet,
+                "halt_entries": req.halt_entries,
+                "flatten": req.flatten,
+                "status": "published",
+                "action": format!("{:?}", action),
+            }))
+        }
+        Err(e) => {
+            warn!("halt publish failed: {e}");
+            Json(serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+            }))
+        }
+    }
 }
 
 async fn list_suggestions() -> Json<serde_json::Value> {
@@ -78,7 +121,9 @@ async fn list_suggestions() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "suggestions": items }))
 }
 
-async fn apply_suggestion(axum::extract::Path(id): axum::extract::Path<String>) -> Json<serde_json::Value> {
+async fn apply_suggestion(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "id": id, "status": "applied", "queued": true }))
 }
 
@@ -96,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("BOT_CONFIG").unwrap_or_else(|_| "config/config.toml".into());
     let cfg = Arc::new(AppConfig::load(&config_path)?);
     let bind = cfg.control_panel.bind_addr.clone();
+    let publisher = Arc::new(ZenohPublisher::open().await?);
 
     let app = Router::new()
         .route("/api/v1/suggestions", get(list_suggestions))
@@ -105,9 +151,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/dashboard", get(dashboard))
         .route("/api/v1/trading/halt", post(halt_trading))
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState { config: cfg });
+        .with_state(AppState {
+            config: cfg,
+            publisher,
+            halt: Arc::new(tokio::sync::Mutex::new(false)),
+        });
 
-    info!("control-panel listening on {bind}");
+    info!("control-panel listening on {bind} (Zenoh command bus enabled)");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     axum::serve(listener, app).await?;
     Ok(())

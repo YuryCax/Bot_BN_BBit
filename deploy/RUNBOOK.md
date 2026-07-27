@@ -23,5 +23,6 @@ install -m 644 config/*.toml /etc/bot/
 
 ## Live staged (Gate §8.6.8)
 
+- **Blocked while** `edge_profile.meta.status != "pass"` — see [`NO_LIVE_UNTIL_PASS.md`](NO_LIVE_UNTIL_PASS.md)
 - Start with 1% deposit sizing via `risk_per_trade_pct`
 - Monitor 7 days before full allocation

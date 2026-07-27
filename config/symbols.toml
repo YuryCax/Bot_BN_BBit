@@ -1,12 +1,12 @@
 # MVP Phase 1 — futures-only (spot_enabled = false in config.toml)
-# Sum of futures_alloc_pct for enabled symbols must be <= 1.0
+# SOL/AVAX enabled only after real L2 pass (analyze_lead_lag.py)
 
 [[symbol]]
 id = 1
 binance = "BTCUSDT"
 bybit = "BTCUSDT"
 instrument = "futures"
-leverage = 10
+leverage = 3
 enabled = true
 futures_alloc_pct = 0.20
 
@@ -15,7 +15,7 @@ id = 2
 binance = "ETHUSDT"
 bybit = "ETHUSDT"
 instrument = "futures"
-leverage = 10
+leverage = 3
 enabled = true
 futures_alloc_pct = 0.20
 
@@ -24,16 +24,15 @@ id = 3
 binance = "SOLUSDT"
 bybit = "SOLUSDT"
 instrument = "futures"
-leverage = 10
+leverage = 3
 enabled = false
 futures_alloc_pct = 0.10
 
-# --- Spot (Phase 2, after min_futures_pf_for_spot) ---
-# [[symbol]]
-# id = 4
-# binance = "ETHUSDT"
-# bybit = "ETHUSDT"
-# instrument = "spot"
-# spot_margin_enabled = false
-# enabled = false
-# spot_alloc_pct = 0.15
+[[symbol]]
+id = 4
+binance = "AVAXUSDT"
+bybit = "AVAXUSDT"
+instrument = "futures"
+leverage = 3
+enabled = false
+futures_alloc_pct = 0.10

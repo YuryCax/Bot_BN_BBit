@@ -43,6 +43,9 @@ pub struct DeploymentConfig {
     pub start_futures_pairs: Vec<String>,
     pub max_symbols: usize,
     pub edge_profile_path: String,
+    /// Allow `mode=paper` without edge pass — still never places live orders.
+    #[serde(default)]
+    pub allow_unverified_paper: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -84,10 +87,24 @@ pub struct ExecutionConfig {
     pub max_leverage_futures: u32,
     pub margin_mode: String,
     pub slippage_limit_pct: f64,
+    /// L2 / book VWAP budget (bps) for sizing — not the signal kill threshold.
+    #[serde(default = "default_max_slippage_bps")]
+    pub max_slippage_bps: f64,
+    /// Reject if Bybit mid already moved this far vs Binance ref (bps). Must be > lag_min.
+    #[serde(default = "default_max_adverse_move_bps")]
+    pub max_adverse_move_bps: f64,
     pub use_limit_fallback: bool,
     pub limit_fallback_timeout_ms: u64,
     pub limit_offset_pct: f64,
     pub slippage_adaptive_resize: bool,
+}
+
+fn default_max_slippage_bps() -> f64 {
+    8.0
+}
+
+fn default_max_adverse_move_bps() -> f64 {
+    15.0
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -168,6 +185,11 @@ pub struct EdgeMeta {
     pub research_period_days: u32,
     pub injected_latency_ms: u32,
     pub status: String,
+    #[serde(default)]
+    pub research_method: Option<String>,
+    /// `synthetic` | `live` | `binance_vision` — synthetic must not unlock paper/live.
+    #[serde(default)]
+    pub data_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -177,6 +199,12 @@ pub struct EdgeSymbolConfig {
     pub lag_min_bps: f64,
     pub trade_hours_utc: Vec<u32>,
     pub vol_regime_min_atr_pct: f64,
+    /// Book VWAP p95 (sizing).
+    #[serde(default)]
+    pub max_slippage_bps: Option<f64>,
+    /// Adverse Bybit move vs signal ref kill threshold.
+    #[serde(default)]
+    pub max_adverse_move_bps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -1,0 +1,34 @@
+{
+  "BTCUSDT": {
+    "symbol": "BTCUSDT",
+    "method": "event",
+    "impulse_min_bps": 12.0,
+    "latency_ms": 150,
+    "bar_ms": 50,
+    "n_events": 19,
+    "mean_gross_bps": 10.561,
+    "best_hour_gross_bps": 26.528,
+    "mean_net_bps": -0.96,
+    "best_hour_net_bps": 15.007,
+    "follow_through": 0.947,
+    "positive_hours": 5,
+    "med_slip_bps": 0.521,
+    "pass_candidate": true
+  },
+  "ETHUSDT": {
+    "symbol": "ETHUSDT",
+    "method": "event",
+    "impulse_min_bps": 8.0,
+    "latency_ms": 250,
+    "bar_ms": 50,
+    "n_events": 255,
+    "mean_gross_bps": 6.116,
+    "best_hour_gross_bps": 17.982,
+    "mean_net_bps": -5.405,
+    "best_hour_net_bps": 6.461,
+    "follow_through": 0.78,
+    "positive_hours": 1,
+    "med_slip_bps": 0.521,
+    "pass_candidate": false
+  }
+}

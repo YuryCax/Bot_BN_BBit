@@ -18,6 +18,40 @@ pub struct OrderRequest {
     pub qty: f64,
     pub price: Option<f64>,
     pub order_type: String,
+    /// Trigger price for StopMarket / TakeProfitMarket.
+    pub trigger_price: Option<f64>,
+    pub reduce_only: bool,
+}
+
+impl OrderRequest {
+    pub fn market(symbol: impl Into<String>, side: impl Into<String>, qty: f64) -> Self {
+        Self {
+            symbol: symbol.into(),
+            side: side.into(),
+            qty,
+            price: None,
+            order_type: "Market".into(),
+            trigger_price: None,
+            reduce_only: false,
+        }
+    }
+
+    pub fn stop_market(
+        symbol: impl Into<String>,
+        side: impl Into<String>,
+        qty: f64,
+        trigger: f64,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            side: side.into(),
+            qty,
+            price: None,
+            order_type: "Market".into(),
+            trigger_price: Some(trigger),
+            reduce_only: true,
+        }
+    }
 }
 
 pub struct BybitConnector {
@@ -73,14 +107,28 @@ impl BybitConnector {
     pub async fn place_order(&self, req: &OrderRequest) -> anyhow::Result<String> {
         let ts = utc_now_ns() / 1_000_000;
         let recv_window = 5000u64;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "category": "linear",
             "symbol": req.symbol,
             "side": req.side,
             "orderType": req.order_type,
             "qty": format!("{:.6}", req.qty),
-            "timeInForce": "IOC",
+            "timeInForce": "GTC",
+            "reduceOnly": req.reduce_only,
         });
+        if let Some(trig) = req.trigger_price {
+            body["orderType"] = serde_json::json!("Market");
+            body["triggerPrice"] = serde_json::json!(format!("{trig:.2}"));
+            body["triggerDirection"] = serde_json::json!(if req.side.eq_ignore_ascii_case("Sell") {
+                2
+            } else {
+                1
+            });
+            body["triggerBy"] = serde_json::json!("LastPrice");
+            body["timeInForce"] = serde_json::json!("GTC");
+        } else {
+            body["timeInForce"] = serde_json::json!("IOC");
+        }
         let body_str = body.to_string();
         let sign_payload = format!("{ts}{}{recv_window}{body_str}", self.api_key);
         let sign = sign_bybit(&self.api_secret, &sign_payload);
@@ -98,5 +146,17 @@ impl BybitConnector {
             .await?
             .error_for_status()?;
         Ok(resp.text().await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_market_sets_trigger() {
+        let r = OrderRequest::stop_market("BTCUSDT", "Sell", 0.01, 65_000.0);
+        assert!(r.reduce_only);
+        assert_eq!(r.trigger_price, Some(65_000.0));
     }
 }

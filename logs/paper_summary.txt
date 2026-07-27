@@ -1,0 +1,4 @@
+closed_trades=0
+fees_usdt=0.0000
+net_pnl_usdt=0.0000
+fills=0

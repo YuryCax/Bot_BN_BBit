@@ -40,16 +40,49 @@ pub fn validate_startup(
     }
 
     if paper_or_live {
-        if edge.meta.status != "pass" {
+        if cfg.deployment.mode.eq_ignore_ascii_case("live")
+            && cfg.deployment.allow_unverified_paper
+        {
             return Err(ValidationError::Message(
-                "edge_profile.meta.status must be 'pass' for paper/live".into(),
+                "allow_unverified_paper cannot be used with mode=live".into(),
             ));
         }
-        let any_positive = edge.edges.values().any(|e| e.net_edge_bps > 0.0);
-        if !any_positive {
-            return Err(ValidationError::Message(
-                "edge_profile: no symbol with net_edge_bps > 0".into(),
-            ));
+        let skip_edge = cfg.deployment.allow_unverified_paper
+            && cfg.deployment.mode.eq_ignore_ascii_case("paper");
+        if !skip_edge {
+            if edge.meta.status != "pass" {
+                return Err(ValidationError::Message(
+                    "edge_profile.meta.status must be 'pass' for paper/live".into(),
+                ));
+            }
+            let src = edge.meta.data_source.as_deref().unwrap_or("");
+            if src.is_empty() || src.eq_ignore_ascii_case("synthetic") {
+                return Err(ValidationError::Message(
+                    "edge_profile.meta.data_source must be live/binance_vision (synthetic forbidden for paper/live)"
+                        .into(),
+                ));
+            }
+            if edge.meta.research_period_days < 14 {
+                return Err(ValidationError::Message(format!(
+                    "edge_profile.meta.research_period_days={} < 14 required for paper/live",
+                    edge.meta.research_period_days
+                )));
+            }
+            let method = edge.meta.research_method.as_deref().unwrap_or("");
+            if method != "l2_vwap" {
+                return Err(ValidationError::Message(
+                    "edge_profile.meta.research_method must be 'l2_vwap' for paper/live".into(),
+                ));
+            }
+            let any_positive = edge
+                .edges
+                .values()
+                .any(|e| e.net_edge_bps > 0.0 && e.trade_hours_utc.len() >= 3);
+            if !any_positive {
+                return Err(ValidationError::Message(
+                    "edge_profile: need ≥1 symbol with net_edge_bps > 0 and ≥3 trade hours".into(),
+                ));
+            }
         }
     }
 
@@ -77,6 +110,7 @@ mod tests {
                 start_futures_pairs: vec!["BTCUSDT".into()],
                 max_symbols: 35,
                 edge_profile_path: "config/edge_profile.toml".into(),
+                allow_unverified_paper: false,
             },
             resources: ResourcesConfig {
                 depth_enabled: false,
@@ -112,10 +146,12 @@ mod tests {
                 fee_profit_buffer_pct: 0.0003,
             },
             execution: ExecutionConfig {
-                default_leverage_futures: 10,
-                max_leverage_futures: 20,
+                default_leverage_futures: 3,
+                max_leverage_futures: 5,
                 margin_mode: "isolated".into(),
                 slippage_limit_pct: 0.0005,
+                max_slippage_bps: 8.0,
+                max_adverse_move_bps: 15.0,
                 use_limit_fallback: true,
                 limit_fallback_timeout_ms: 50,
                 limit_offset_pct: 0.0001,
@@ -178,9 +214,93 @@ mod tests {
                 research_period_days: 0,
                 injected_latency_ms: 150,
                 status: "pending".into(),
+                research_method: None,
+                data_source: None,
             },
             edges: Default::default(),
         };
         assert!(validate_startup(&cfg, &symbols, &edge, true).is_err());
+    }
+
+    #[test]
+    fn rejects_synthetic_pass_on_paper() {
+        let cfg = base_cfg();
+        let symbols = SymbolsFile { symbol: vec![] };
+        let mut edges = std::collections::HashMap::new();
+        edges.insert(
+            "BTCUSDT".into(),
+            EdgeSymbolConfig {
+                net_edge_bps: 5.0,
+                follow_through_min: 0.4,
+                lag_min_bps: 3.0,
+                trade_hours_utc: vec![13, 14, 15],
+                vol_regime_min_atr_pct: 0.0025,
+                max_slippage_bps: Some(8.0),
+                max_adverse_move_bps: Some(15.0),
+            },
+        );
+        let edge = EdgeProfile {
+            meta: EdgeMeta {
+                generated_at: "".into(),
+                research_period_days: 14,
+                injected_latency_ms: 150,
+                status: "pass".into(),
+                research_method: Some("l2_vwap".into()),
+                data_source: Some("synthetic".into()),
+            },
+            edges,
+        };
+        assert!(validate_startup(&cfg, &symbols, &edge, true).is_err());
+    }
+
+    #[test]
+    fn rejects_short_research_period() {
+        let cfg = base_cfg();
+        let symbols = SymbolsFile { symbol: vec![] };
+        let mut edges = std::collections::HashMap::new();
+        edges.insert(
+            "BTCUSDT".into(),
+            EdgeSymbolConfig {
+                net_edge_bps: 5.0,
+                follow_through_min: 0.4,
+                lag_min_bps: 3.0,
+                trade_hours_utc: vec![13, 14, 15],
+                vol_regime_min_atr_pct: 0.0025,
+                max_slippage_bps: Some(8.0),
+                max_adverse_move_bps: Some(15.0),
+            },
+        );
+        let edge = EdgeProfile {
+            meta: EdgeMeta {
+                generated_at: "".into(),
+                research_period_days: 7,
+                injected_latency_ms: 150,
+                status: "pass".into(),
+                research_method: Some("l2_vwap".into()),
+                data_source: Some("binance_vision".into()),
+            },
+            edges,
+        };
+        assert!(validate_startup(&cfg, &symbols, &edge, true).is_err());
+    }
+
+    #[test]
+    fn allows_unverified_paper_without_edge() {
+        let mut cfg = base_cfg();
+        cfg.deployment.mode = "paper".into();
+        cfg.deployment.allow_unverified_paper = true;
+        let symbols = SymbolsFile { symbol: vec![] };
+        let edge = EdgeProfile {
+            meta: EdgeMeta {
+                generated_at: "".into(),
+                research_period_days: 1,
+                injected_latency_ms: 150,
+                status: "fail".into(),
+                research_method: Some("l2_vwap".into()),
+                data_source: Some("synthetic".into()),
+            },
+            edges: Default::default(),
+        };
+        assert!(validate_startup(&cfg, &symbols, &edge, true).is_ok());
     }
 }

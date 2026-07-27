@@ -1,20 +1,32 @@
+//! ADR-003 Executor: local Bybit mid + EntryEngine + Risk + orders + paper ledger.
+
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use executor_core::bybit::{BybitConnector, OrderRequest};
-use executor_core::position::{ExitReason, PositionManager};
-use executor_core::receiver::freshness_ok;
+use executor_core::paper_ledger::PaperLedger;
+use executor_core::position::PositionManager;
 use executor_core::risk::{RiskDecision, RiskEngine};
-use executor_core::safe_mode::SafeMode;
+use executor_core::safe_mode::{SafeMode, SafeModePhase};
+use executor_core::trading_mode::allow_live_orders;
+use executor_core::warm_risk::WarmRiskState;
 use observer_core::bybit::stream_bybit_mids;
+use observer_core::entry::EntryEngine;
+use observer_core::follow_through::FollowThroughTracker;
+use observer_core::lag::LagState;
+use observer_core::math::SymbolMetrics;
 use shared::config::{AppConfig, EdgeProfile, SymbolsFile};
-use shared::packet::{BybitMidFeed, InstrumentType, PositionState, Side};
+use shared::packet::{
+    BinanceTick, InstrumentType, OperatorAction, OperatorCommand, PositionState, Side,
+};
+use shared::packet_log::PacketLogWriter;
 use shared::registry::SymbolRegistry;
 use shared::time::utc_now_ns;
 use shared::validation::validate_startup;
-use shared::zenoh_ipc::{ZenohPublisher, ZenohSubscriber};
+use shared::zenoh_ipc::ZenohSubscriber;
 use tracing::{info, warn};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -41,36 +53,107 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = SymbolRegistry::from_symbols(&symbols.symbol);
     let mut id_to_bybit: HashMap<u16, String> = HashMap::new();
+    let mut id_to_binance: HashMap<u16, String> = HashMap::new();
+    let mut adverse_by_id: HashMap<u16, f32> = HashMap::new();
     for s in &symbols.symbol {
         if s.enabled {
             id_to_bybit.insert(s.id, s.bybit.clone());
+            id_to_binance.insert(s.id, s.binance.clone());
+            if let Some(e) = edge.edges.get(&s.binance) {
+                if let Some(bps) = e.max_adverse_move_bps {
+                    adverse_by_id.insert(s.id, bps as f32);
+                }
+            }
+        }
+    }
+
+    let engine = Arc::new(EntryEngine::from_config(
+        &cfg.lag,
+        cfg.fees.d_min_net_futures(),
+        cfg.signals.z_score_entry,
+        cfg.signals.velocity_min,
+    ));
+
+    let metrics: Arc<Mutex<HashMap<u16, SymbolMetrics>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let lags: Arc<Mutex<HashMap<u16, LagState>>> = Arc::new(Mutex::new(HashMap::new()));
+    let follow_through: Arc<Mutex<HashMap<u16, FollowThroughTracker>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    for s in &symbols.symbol {
+        if s.enabled {
+            metrics.lock().unwrap().insert(s.id, SymbolMetrics::default());
+            lags.lock().unwrap().insert(
+                s.id,
+                LagState {
+                    max_staleness_ms: cfg.lag.bybit_mid_max_staleness_ms,
+                    ..Default::default()
+                },
+            );
+            let ft_min = edge
+                .edges
+                .get(&s.binance)
+                .map(|e| e.follow_through_min as f32)
+                .unwrap_or(cfg.lag.follow_through_min);
+            follow_through
+                .lock()
+                .unwrap()
+                .insert(s.id, FollowThroughTracker::new(ft_min, 200));
         }
     }
 
     let mut risk = RiskEngine::default();
     risk.max_latency_ns = cfg.network.max_latency_ms * 1_000_000;
+    risk.max_adverse_move_bps = cfg.execution.max_adverse_move_bps as f32;
+
     let pm = PositionManager {
         convergence_ratio: cfg.lag.convergence_exit_ratio,
         time_stop_ms: cfg.lag.time_stop_ms,
         ..Default::default()
     };
-    let safe_mode = SafeMode::new(
+    let mut safe_mode = SafeMode::new(
         cfg.safe_mode.heartbeat_miss_caution,
         cfg.safe_mode.heartbeat_miss_defensive,
         cfg.safe_mode.heartbeat_miss_emergency,
     );
 
-    let publisher = Arc::new(ZenohPublisher::open().await.context("zenoh publisher")?);
-    let subscriber = ZenohSubscriber::open().await.context("zenoh subscriber")?;
+    let mut warm = WarmRiskState {
+        max_daily_dd_futures: cfg.risk.max_daily_drawdown_futures,
+        max_funding_rate: 0.0001,
+        min_book_depth_usd: 5_000.0,
+        book_depth_usd: 50_000.0,
+        ..Default::default()
+    };
+    warm.publish();
+
     let bybit_api = BybitConnector::from_env();
-    if bybit_api.is_none() {
-        warn!("BYBIT_API_KEY not set — orders will be dry-run only");
+    let live_orders = allow_live_orders(&cfg.deployment.mode);
+    if live_orders && bybit_api.is_none() {
+        anyhow::bail!("mode=live requires BYBIT_API_KEY / BYBIT_API_SECRET");
     }
+    if !live_orders {
+        info!(
+            "order routing: SIMULATION only (mode={}) — Bybit API will not receive orders",
+            cfg.deployment.mode
+        );
+    } else {
+        warn!("order routing: LIVE Bybit orders enabled");
+    }
+    let sim_ledger = !live_orders;
+
+    let mut ledger = PaperLedger::default();
+    let ledger_path =
+        std::env::var("BOT_LEDGER").unwrap_or_else(|_| "logs/paper_ledger.jsonl".into());
+    let log_path = std::env::var("BOT_PACKET_LOG").unwrap_or_else(|_| "logs/packets.bin".into());
+    let packet_log = Arc::new(Mutex::new(
+        PacketLogWriter::open(&log_path).context("open packet log")?,
+    ));
 
     let mut positions: HashMap<String, PositionState> = HashMap::new();
     let deposit = cfg.capital.initial_futures_deposit_usdt;
+    let fee_rate = cfg.fees.futures_taker_pct;
 
-    // Publish Bybit mid @ ~50Hz to Observer (§3.5.1)
+    // Local Bybit mids
     let bybit_symbols: Vec<String> = symbols
         .symbol
         .iter()
@@ -83,132 +166,428 @@ async fn main() -> anyhow::Result<()> {
             sym_map.insert(s.bybit.clone(), s.id);
         }
     }
-    let feed_hz = cfg.lag.bybit_mid_feed_hz;
-    let (mid_tx, mut mid_rx) = tokio::sync::mpsc::unbounded_channel::<BybitMidFeed>();
-    let pub_mid = Arc::clone(&publisher);
-    tokio::spawn(async move {
-        while let Some(feed) = mid_rx.recv().await {
-            if let Err(e) = pub_mid.publish_bybit_mid(&feed).await {
-                warn!("bybit mid publish: {e}");
-            }
-        }
-    });
-
+    let lags_by = Arc::clone(&lags);
     tokio::spawn(async move {
         let _ = stream_bybit_mids(&bybit_symbols, move |tick| {
             let Some(symbol_id) = sym_map.get(&tick.symbol).copied() else {
                 return;
             };
-            let feed = BybitMidFeed {
-                symbol_id,
-                bybit_mid: tick.mid,
-                ts_ns: utc_now_ns(),
-            };
-            let _ = mid_tx.send(feed);
+            if let Some(state) = lags_by.lock().unwrap().get_mut(&symbol_id) {
+                state.bybit_mid = tick.mid;
+                state.bybit_ts_ns = utc_now_ns();
+            }
         })
         .await;
-        let _ = feed_hz;
     });
 
-    info!(
-        "executor started pairs={} dry_run={}",
-        registry.active_count.load(Ordering::Relaxed),
-        bybit_api.is_none()
-    );
+    let subscriber = ZenohSubscriber::open().await.context("zenoh subscriber")?;
+    let (tick_tx, mut tick_rx) = tokio::sync::mpsc::unbounded_channel::<BinanceTick>();
+    let (hb_tx, mut hb_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<OperatorCommand>();
 
-    let (pkt_tx, mut pkt_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         let _ = subscriber
-            .run_packets(move |packet| {
-                let _ = pkt_tx.send(packet);
+            .run_binance_ticks(move |tick| {
+                let _ = tick_tx.send(tick);
+            })
+            .await;
+    });
+    let sub_hb = ZenohSubscriber::open().await.context("zenoh hb")?;
+    tokio::spawn(async move {
+        let _ = sub_hb
+            .run_heartbeat(move |ts| {
+                let _ = hb_tx.send(ts);
+            })
+            .await;
+    });
+    let sub_cmd = ZenohSubscriber::open().await.context("zenoh cmd")?;
+    tokio::spawn(async move {
+        let _ = sub_cmd
+            .run_commands(move |cmd| {
+                let _ = cmd_tx.send(cmd);
             })
             .await;
     });
 
-    while let Some(packet) = pkt_rx.recv().await {
-        for pos in positions.values_mut() {
-            pm.update_lag_capture(pos, &packet);
-            if let Some(reason) = pm.check_exit(pos, deposit, &packet, utc_now_ns()) {
-                info!("exit {:?} pos={}", reason, pos.id);
-            }
-        }
+    info!(
+        "executor started ADR-003 mode={} pairs={} live_orders={} adverse_bps={:.1}",
+        cfg.deployment.mode,
+        registry.active_count.load(Ordering::Relaxed),
+        live_orders,
+        risk.max_adverse_move_bps
+    );
 
-        match risk.check_entry(&packet) {
-            RiskDecision::Open => {
-                if !freshness_ok(&packet, risk.max_latency_ns) {
-                    continue;
+    let heartbeat_timeout =
+        Duration::from_millis(cfg.network.heartbeat_timeout_ms.max(500));
+    let mut last_hb = Instant::now();
+    let pending_ft: Arc<Mutex<Vec<(u16, u64, i8, f64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let edge = Arc::new(edge);
+    let mut operator_halt = false;
+    let mut flatten_request = false;
+
+    loop {
+        tokio::select! {
+            Some(cmd) = cmd_rx.recv() => {
+                info!("operator cmd {:?} from {}", cmd.action, cmd.source);
+                match cmd.action {
+                    OperatorAction::HaltEntries => {
+                        operator_halt = true;
+                        warm.entries_halted = true;
+                        warm.publish();
+                    }
+                    OperatorAction::ResumeEntries => {
+                        operator_halt = false;
+                        warm.entries_halted = safe_mode.halt_entries();
+                        warm.publish();
+                    }
+                    OperatorAction::FlattenAll => {
+                        flatten_request = true;
+                        operator_halt = true;
+                        warm.entries_halted = true;
+                        warm.publish();
+                    }
+                    OperatorAction::StatusPing => {
+                        info!(
+                            "status ping live_orders={} halt={} positions={} ledger_net={:.4}",
+                            live_orders,
+                            operator_halt,
+                            positions.len(),
+                            ledger.net_pnl()
+                        );
+                    }
                 }
-                let Some(symbol) = id_to_bybit.get(&packet.symbol_id) else {
-                    continue;
-                };
-                let side = if packet.direction_bias > 0 {
-                    "Buy"
+            }
+            Some(ts) = hb_rx.recv() => {
+                let _ = ts;
+                last_hb = Instant::now();
+                safe_mode.on_heartbeat();
+                warm.entries_halted = operator_halt || safe_mode.halt_entries();
+                // DD from paper ledger vs starting deposit
+                warm.day_pnl_pct = if deposit > 0.0 {
+                    ledger.net_pnl() / deposit
                 } else {
-                    "Sell"
+                    0.0
                 };
-                let alloc = symbols
-                    .symbol
-                    .iter()
-                    .find(|s| s.id == packet.symbol_id)
-                    .and_then(|s| s.futures_alloc_pct)
-                    .unwrap_or(0.05);
-                let notional = deposit * alloc * cfg.execution.default_leverage_futures as f64;
-                let qty = notional / packet.ref_price.max(1.0);
+                warm.publish();
+            }
+            Some(tick) = tick_rx.recv() => {
+                // Heartbeat is dedicated topic only (ADR-003 / Sprint C) — ticks must not mask feed loss.
 
-                info!(
-                    "entry approved {} {} qty={:.6} lag_res={:.2}",
-                    symbol, side, qty, packet.lag_residual_bps
-                );
+                let sid = tick.symbol_id;
+                let binance_sym = id_to_binance.get(&sid).cloned().unwrap_or_default();
 
-                if let Some(api) = &bybit_api {
-                    let req = OrderRequest {
-                        symbol: symbol.clone(),
-                        side: side.into(),
-                        qty,
-                        price: None,
-                        order_type: "Market".into(),
-                    };
-                    match api.place_order(&req).await {
-                        Ok(body) => info!("bybit order response: {body}"),
-                        Err(e) => warn!("bybit order failed: {e}"),
+                {
+                    let mut m = metrics.lock().unwrap();
+                    let entry = m.entry(sid).or_default();
+                    entry.push_price(tick.mid);
+                    let mut lag_map = lags.lock().unwrap();
+                    if let Some(lag_state) = lag_map.get_mut(&sid) {
+                        lag_state.binance_mid_100ms_ago = entry.price_100ms_ago(1);
                     }
                 }
 
-                let pos_id = format!("{}-{}", symbol, packet.seq_num);
-                positions.insert(
-                    pos_id.clone(),
-                    PositionState {
-                        id: pos_id,
-                        symbol_id: packet.symbol_id,
-                        side: if packet.direction_bias > 0 {
+                let lag_state = lags
+                    .lock()
+                    .unwrap()
+                    .get(&sid)
+                    .cloned()
+                    .unwrap_or_default();
+                let metrics_snap = metrics
+                    .lock()
+                    .unwrap()
+                    .get(&sid)
+                    .cloned()
+                    .unwrap_or_default();
+
+                let now_ns = utc_now_ns();
+                let hour = (now_ns / 3_600_000_000_000) % 24;
+                let trade_hour_ok = edge
+                    .edges
+                    .get(&binance_sym)
+                    .map(|e| e.trade_hours_utc.is_empty() || e.trade_hours_utc.contains(&(hour as u32)))
+                    .unwrap_or(true);
+
+                // Resolve FT pending
+                {
+                    let mut pending = pending_ft.lock().unwrap();
+                    let mut ft_map = follow_through.lock().unwrap();
+                    pending.retain(|(psid, ts, dir, by_mid)| {
+                        if now_ns.saturating_sub(*ts) < 300_000_000 {
+                            return true;
+                        }
+                        if let Some(tracker) = ft_map.get_mut(psid) {
+                            let by_now = lags
+                                .lock()
+                                .unwrap()
+                                .get(psid)
+                                .map(|s| s.bybit_mid)
+                                .unwrap_or(*by_mid);
+                            if *by_mid > 0.0 && by_now > 0.0 {
+                                let ret = (by_now - *by_mid) / *by_mid;
+                                tracker.record(ret * (*dir as f64) > 0.0);
+                            }
+                        }
+                        false
+                    });
+                }
+
+                let ft_ok = follow_through
+                    .lock()
+                    .unwrap()
+                    .get(&sid)
+                    .map(|t| t.allows_entry())
+                    .unwrap_or(true);
+
+                let residual = lag_state.lag_residual_bps(tick.mid);
+                let impulse = lag_state.impulse_bps(tick.mid);
+                let stale = lag_state.is_stale();
+
+                let mut pkt = engine.evaluate(
+                    &metrics_snap,
+                    tick.mid,
+                    residual,
+                    impulse,
+                    stale,
+                    trade_hour_ok && ft_ok,
+                );
+                pkt.symbol_id = sid;
+                pkt.seq_num = tick.seq_num;
+                pkt.ts_ns = tick.ts_ns; // age = forwarded tick age
+                pkt.bybit_mid_ref = lag_state.bybit_mid;
+                pkt.lag_bps = lag_state.lag_bps(tick.mid);
+                pkt.lag_residual_bps = residual;
+                pkt.impulse_bps_100ms = impulse;
+                pkt.ref_price = tick.mid;
+
+                if let Err(e) = packet_log.lock().unwrap().append(&pkt) {
+                    warn!("packet log: {e}");
+                }
+
+                // Exits
+                let mut closed: Vec<String> = Vec::new();
+                for (id, pos) in positions.iter_mut() {
+                    pm.update_lag_capture(pos, &pkt);
+                    let bybit_mid = if pkt.symbol_id == pos.symbol_id && pkt.bybit_mid_ref > 0.0 {
+                        pkt.bybit_mid_ref
+                    } else {
+                        lags.lock()
+                            .unwrap()
+                            .get(&pos.symbol_id)
+                            .map(|s| s.bybit_mid)
+                            .unwrap_or(pos.entry_price)
+                    };
+                    if let Some(reason) = pm.check_exit(pos, bybit_mid, &pkt, utc_now_ns()) {
+                        info!("exit {:?} pos={}", reason, pos.id);
+                        if let Some(symbol) = id_to_bybit.get(&pos.symbol_id) {
+                            let close_side = match pos.side {
+                                Side::Long => "Sell",
+                                Side::Short => "Buy",
+                            };
+                            if live_orders {
+                                if let Some(api) = &bybit_api {
+                                    let req = OrderRequest::market(
+                                        symbol.clone(),
+                                        close_side,
+                                        pos.qty_remaining,
+                                    );
+                                    let _ = api.place_order(&req).await;
+                                }
+                            }
+                            ledger.record_exit(
+                                symbol,
+                                close_side,
+                                pos.qty_remaining,
+                                pos.entry_price,
+                                bybit_mid,
+                                fee_rate,
+                                sim_ledger,
+                                &format!("{reason:?}"),
+                            );
+                            let _ = ledger.append_jsonl(&ledger_path);
+                        }
+                        closed.push(id.clone());
+                    }
+                }
+                for id in closed {
+                    positions.remove(&id);
+                }
+
+                if safe_mode.close_all() || flatten_request {
+                    warn!(
+                        "flatten positions (safe_mode={} operator={})",
+                        safe_mode.close_all(),
+                        flatten_request
+                    );
+                    flatten_request = false;
+                    for (id, pos) in positions.drain() {
+                        if let Some(symbol) = id_to_bybit.get(&pos.symbol_id) {
+                            let close_side = match pos.side {
+                                Side::Long => "Sell",
+                                Side::Short => "Buy",
+                            };
+                            if live_orders {
+                                if let Some(api) = &bybit_api {
+                                    let req = OrderRequest::market(
+                                        symbol.clone(),
+                                        close_side,
+                                        pos.qty_remaining,
+                                    );
+                                    let _ = api.place_order(&req).await;
+                                }
+                            }
+                            ledger.record_exit(
+                                symbol,
+                                close_side,
+                                pos.qty_remaining,
+                                pos.entry_price,
+                                pkt.bybit_mid_ref.max(pos.entry_price),
+                                fee_rate,
+                                sim_ledger,
+                                "flatten",
+                            );
+                        }
+                        let _ = id;
+                    }
+                    continue;
+                }
+
+                if operator_halt || safe_mode.halt_entries() || warm.entries_halted {
+                    continue;
+                }
+
+                if let Some(bps) = adverse_by_id.get(&sid) {
+                    risk.max_adverse_move_bps = *bps;
+                } else {
+                    risk.max_adverse_move_bps = cfg.execution.max_adverse_move_bps as f32;
+                }
+
+                match risk.check_entry(&pkt) {
+                    RiskDecision::Open => {
+                        let Some(symbol) = id_to_bybit.get(&sid) else { continue };
+                        let side = if pkt.direction_bias > 0 { "Buy" } else { "Sell" };
+                        let alloc = symbols
+                            .symbol
+                            .iter()
+                            .find(|s| s.id == sid)
+                            .and_then(|s| s.futures_alloc_pct)
+                            .unwrap_or(0.05);
+                        let lev = symbols
+                            .symbol
+                            .iter()
+                            .find(|s| s.id == sid)
+                            .and_then(|s| s.leverage)
+                            .unwrap_or(cfg.execution.default_leverage_futures);
+                        // Staged live: risk_per_trade_pct of deposit as margin
+                        let risk_frac = if cfg.deployment.mode == "live" {
+                            cfg.capital.risk_per_trade_pct
+                        } else {
+                            alloc
+                        };
+                        let notional = deposit * risk_frac * lev as f64;
+                        let qty = notional / pkt.ref_price.max(1.0);
+
+                        info!(
+                            "entry {} {} qty={:.6} lag_res={:.2} adverse_lim={:.1} live={}",
+                            symbol, side, qty, pkt.lag_residual_bps, risk.max_adverse_move_bps, live_orders
+                        );
+
+                        let pos_side = if pkt.direction_bias > 0 {
                             Side::Long
                         } else {
                             Side::Short
-                        },
-                        instrument: InstrumentType::Futures,
-                        entry_price: packet.ref_price,
-                        qty,
-                        qty_remaining: qty,
-                        open_time_ns: utc_now_ns(),
-                        entry_impulse_bps: packet.impulse_bps_100ms,
-                        lag_capture_ratio: 0.0,
-                        current_stop: 0.0,
-                        current_tp: 0.0,
-                        sl_phase: 0,
-                        tp_phase: 0,
-                        partial_done: false,
-                        pnl_pct: 0.0,
-                        exchange_stop_id: None,
-                    },
-                );
+                        };
+                        let (stop, tp) = pm.initial_stops(
+                            pos_side,
+                            pkt.ref_price,
+                            pkt.atr,
+                            cfg.risk.atr_multiplier_stop,
+                            cfg.take_profit.initial_target_pct,
+                        );
+
+                        if live_orders {
+                            if let Some(api) = &bybit_api {
+                                let req = OrderRequest::market(symbol.clone(), side, qty);
+                                match api.place_order(&req).await {
+                                    Ok(body) => info!("bybit order: {body}"),
+                                    Err(e) => warn!("bybit order failed: {e}"),
+                                }
+                                let stop_side = if pos_side == Side::Long { "Sell" } else { "Buy" };
+                                let stop_req = OrderRequest::stop_market(
+                                    symbol.clone(),
+                                    stop_side,
+                                    qty,
+                                    stop,
+                                );
+                                match api.place_order(&stop_req).await {
+                                    Ok(body) => info!("bybit stop: {body}"),
+                                    Err(e) => warn!("bybit stop failed: {e}"),
+                                }
+                            }
+                        }
+
+                        ledger.record_entry(symbol, side, qty, pkt.ref_price, fee_rate, sim_ledger);
+                        let _ = ledger.append_jsonl(&ledger_path);
+
+                        pending_ft.lock().unwrap().push((
+                            sid,
+                            now_ns,
+                            pkt.direction_bias,
+                            lag_state.bybit_mid,
+                        ));
+
+                        let pos_id = format!("{}-{}", symbol, pkt.seq_num);
+                        positions.insert(
+                            pos_id.clone(),
+                            PositionState {
+                                id: pos_id,
+                                symbol_id: sid,
+                                side: pos_side,
+                                instrument: InstrumentType::Futures,
+                                entry_price: pkt.ref_price,
+                                qty,
+                                qty_remaining: qty,
+                                open_time_ns: utc_now_ns(),
+                                entry_impulse_bps: pkt.impulse_bps_100ms,
+                                lag_capture_ratio: 0.0,
+                                current_stop: stop,
+                                current_tp: tp,
+                                sl_phase: 0,
+                                tp_phase: 0,
+                                partial_done: false,
+                                pnl_pct: 0.0,
+                                exchange_stop_id: None,
+                            },
+                        );
+                    }
+                    RiskDecision::Stale => warn!("stale tick seq={}", pkt.seq_num),
+                    RiskDecision::AdverseMoveExceeded => {
+                        warn!(
+                            "adverse kill seq={} ref={:.2} bybit={:.2}",
+                            pkt.seq_num, pkt.ref_price, pkt.bybit_mid_ref
+                        );
+                    }
+                    RiskDecision::Duplicate | RiskDecision::Skip => {}
+                }
             }
-            RiskDecision::Stale => warn!("stale packet seq={}", packet.seq_num),
-            RiskDecision::Duplicate => {}
-            RiskDecision::Skip => {}
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if last_hb.elapsed() > heartbeat_timeout {
+                    safe_mode.on_miss();
+                    warm.entries_halted = operator_halt || safe_mode.halt_entries();
+                    warm.day_pnl_pct = if deposit > 0.0 {
+                        ledger.net_pnl() / deposit
+                    } else {
+                        0.0
+                    };
+                    warm.publish();
+                    if safe_mode.phase != SafeModePhase::Normal {
+                        warn!(
+                            "heartbeat miss phase={:?} consecutive={}",
+                            safe_mode.phase, safe_mode.consecutive_misses
+                        );
+                    }
+                }
+                let _ = ledger.write_summary("logs/paper_summary.txt");
+            }
         }
-
-        let _ = (&safe_mode, ExitReason::Manual);
     }
-
-    Ok(())
 }

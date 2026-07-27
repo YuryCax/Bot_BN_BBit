@@ -7,7 +7,9 @@ initial_spot_deposit_usdt = 0.0
 risk_per_trade_pct = 0.01
 
 [deployment]
-mode = "start"
+# Mode: "dev" = wiring (edge skipped). "paper" needs edge pass OR allow_unverified_paper=true (sim only).
+# "live" always needs edge pass and places real orders.
+mode = "dev"
 observer_instance_type = "t3.micro"
 executor_instance_type = "t3.small"
 spot_enabled = false
@@ -15,6 +17,8 @@ min_futures_pf_for_spot = 1.3
 start_futures_pairs = ["BTCUSDT", "ETHUSDT"]
 max_symbols = 35
 edge_profile_path = "config/edge_profile.toml"
+# Set true only to exercise paper ledger without edge pass — never enables live orders.
+allow_unverified_paper = false
 
 [resources]
 depth_enabled = false
@@ -26,7 +30,7 @@ log_tick_debug = false
 tokio_worker_threads = 2
 
 [lag]
-impulse_min_bps = 5.0
+impulse_min_bps = 8.0
 lag_min_bps = 3.0
 follow_through_min = 0.40
 convergence_exit_ratio = 0.75
@@ -53,10 +57,15 @@ heartbeat_emergency_timeout_ms = 500
 spot_min_tp_pct = 0.008
 
 [execution]
-default_leverage_futures = 10
-max_leverage_futures = 20
+# Phase 0.5 / v2.4: paper starts at ×3
+default_leverage_futures = 3
+max_leverage_futures = 5
 margin_mode = "isolated"
 slippage_limit_pct = 0.0005
+# Book VWAP budget (sizing / research) — NOT the adverse-move kill
+max_slippage_bps = 8.0
+# Kill if Bybit mid already moved this far vs Binance signal ref (open lag is OK below this)
+max_adverse_move_bps = 15.0
 use_limit_fallback = true
 limit_fallback_timeout_ms = 50
 limit_offset_pct = 0.0001
