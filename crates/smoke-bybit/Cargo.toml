@@ -1,0 +1,15 @@
+[package]
+name = "smoke-bybit"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "smoke-bybit"
+path = "src/main.rs"
+
+[dependencies]
+executor-core = { path = "../executor-core" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

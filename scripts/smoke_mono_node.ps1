@@ -11,6 +11,11 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
+# Optional secrets (feeds work without keys; WS testnet URL if BYBIT_TESTNET=1)
+if (Test-Path (Join-Path $root "secrets.env")) {
+    & "$root\scripts\Import-BotSecrets.ps1"
+}
+
 # Refuse paper/live for this smoke
 $cfgText = Get-Content $Config -Raw
 if ($cfgText -match 'mode\s*=\s*"(paper|live|start)"') {

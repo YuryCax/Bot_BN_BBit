@@ -1,10 +1,13 @@
 # Runbook — deploy & rollback (§9.2)
 
+**AWS path:** [AWS_QUICKSTART.md](AWS_QUICKSTART.md) (`package_release.ps1` → `install.sh`).
+
 ## Build release
 
 ```bash
 cargo build --release
-install -m 755 target/release/{observer,executor,control-panel,telegram-alerts,replay} /opt/bot/bin/
+# Or from Windows: .\scripts\package_release.ps1
+install -m 755 target/release/{observer,executor,control-panel,telegram-alerts,replay,smoke-bybit} /opt/bot/bin/
 install -m 644 config/*.toml /etc/bot/
 # Absolute edge path for systemd WorkingDirectory=/opt/bot:
 #   edge_profile_path = "/etc/bot/edge_profile.toml"

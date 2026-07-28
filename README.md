@@ -1,60 +1,63 @@
 # Bot_BN_BBit
 
-Low-latency cross-exchange lead-lag trading: **Binance Futures (signal) → Bybit Perpetual (execution)**.
+Low-latency cross-exchange lead-lag: **Binance Futures (Tokyo signal) → Bybit Perp (Singapore execution)**.
+
+## Operator path (keys → tests → AWS → monetization)
+
+```powershell
+# 1) Secrets (gitignored)
+.\scripts\init_secrets.ps1
+# edit secrets.env — Bybit TESTNET keys, BYBIT_TESTNET=1
+
+# 2) Wiring smoke (public WS, no orders)
+.\scripts\smoke_mono_node.ps1
+
+# 3) Authenticated Bybit testnet order lifecycle
+.\scripts\Import-BotSecrets.ps1
+.\scripts\smoke_bybit_testnet.ps1
+
+# 4) Real edge research (≥14d L2) before paper/live
+.\scripts\run_quant_hardening.ps1 -Days 14 -LiveDownload
+
+# 5) Package for AWS
+.\scripts\package_release.ps1
+```
+
+Deploy Tokyo + Singapore: **[`deploy/AWS_QUICKSTART.md`](deploy/AWS_QUICKSTART.md)**  
+Gates: [`deploy/NO_LIVE_UNTIL_PASS.md`](deploy/NO_LIVE_UNTIL_PASS.md) · staged live: [`deploy/STAGED_LIVE.md`](deploy/STAGED_LIVE.md)
+
+Keep `mode = "dev"` until edge `status=pass` on real L2. Never commit `secrets.env`.
 
 ## Project structure
 
 ```
-config/           # config.toml, symbols.toml, edge_profile.toml, analyst.toml
-crates/
-  shared/         # MarketStatePacket, config, validation, zenoh IPC
-  observer-core/  # Binance WS, Entry Engine, lag §3.5
-  executor-core/  # Risk, Position Manager, Bybit signing
-  observer-bin/   # observer service
-  executor-bin/   # executor service
-  panel/          # Control Panel REST API §8.5
-  replay/         # Replay engine §9.1
-  telegram-alerts/
-research/         # Phase 0 Edge Research
-analyst/          # Phase 2 offline advisor
-book-collector/   # Phase 2 TimescaleDB
-deploy/           # systemd + docker-compose
+config/           # config.toml, symbols.toml, edge_profile.toml
+crates/           # observer / executor / panel / smoke-bybit / …
+research/         # Edge research (quant + collector)
+deploy/           # systemd, install.sh, AWS quickstart
+scripts/          # smoke, package, secrets helpers
+secrets.env.example
 ```
 
-## Build (requires Rust 1.78+)
+## Build
 
 ```bash
 cargo build --release
-cargo test --all
-```
-
-Binaries: `target/release/observer`, `executor`, `control-panel`, `replay`, `telegram-alerts`
-
-## Phase 0 — Edge Research
-
-```bash
-pip install -r research/collector/requirements.txt
-python research/collector/collector.py --duration-sec 3600
-python research/edge_report/analyze.py
+cargo test --workspace --all-targets
 ```
 
 ## Run (mono-node dev)
 
-```bash
-export BOT_CONFIG=config/config.toml
-export BOT_SYMBOLS=config/symbols.toml
-cargo run -p observer-bin
-cargo run -p executor-bin
-cargo run -p panel
+```powershell
+.\scripts\Import-BotSecrets.ps1   # if secrets.env present
+.\scripts\run_mono_node.ps1
 ```
 
-## Deploy
+## Deploy summary
 
-- Dual-node: `deploy/systemd/` on t3.micro Tokyo + t3.small Singapore
-- TimescaleDB: `docker compose -f deploy/docker-compose.yml up -d`
+| Host | Services |
+|------|----------|
+| Tokyo | `observer` |
+| Singapore | `executor`, `control-panel`, `telegram-alerts` |
 
-## Gates
-
-- **Live:** `config/edge_profile.toml` → `meta.status = "pass"`
-- **Paper:** replay PF ≥ 1.2, follow-through ≥ 40%
-- **Phase 3:** `analyst/phase3/shadow.py` → pf_shadow > pf_actual
+Zenoh TCP 7447 between peers; secrets in `/etc/bot/secrets.env`.

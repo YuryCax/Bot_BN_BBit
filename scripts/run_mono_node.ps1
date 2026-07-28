@@ -10,6 +10,10 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
+if (Test-Path (Join-Path $root "secrets.env")) {
+    & "$root\scripts\Import-BotSecrets.ps1"
+}
+
 $env:BOT_CONFIG = $Config
 $env:BOT_SYMBOLS = "config/symbols.toml"
 $env:BOT_PACKET_LOG = "logs/packets.bin"

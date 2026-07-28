@@ -1,10 +1,15 @@
 # Secrets
 .env
+.env.local
 secrets.env
 **/secrets.env
+secrets/
 *.pem
 *.key
 credentials.json
+config/secrets.toml
+config/config.local.toml
+
 
 # Edge research raw data (large)
 research/data/
@@ -18,6 +23,9 @@ research/data/
 logs/
 paper_ledger*
 paper_summary*
+
+# Release packages
+/dist/
 
 # Rust (future)
 /target/
@@ -36,7 +44,3 @@ __pycache__/
 Thumbs.db
 .idea/
 .vscode/
-
-# Local overrides (never commit production configs with keys)
-config/config.local.toml
-config/secrets.toml
