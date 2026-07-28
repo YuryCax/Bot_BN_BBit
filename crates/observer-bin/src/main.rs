@@ -30,12 +30,14 @@ async fn main() -> anyhow::Result<()> {
     let symbols = SymbolsFile::load(&symbols_path).context("load symbols")?;
     let edge = EdgeProfile::load(&cfg.deployment.edge_profile_path).context("load edge")?;
 
-    let paper_or_live = matches!(cfg.deployment.mode.as_str(), "paper" | "live" | "start");
-    if let Err(e) = validate_startup(&cfg, &symbols, &edge, paper_or_live) {
-        if paper_or_live {
-            anyhow::bail!("startup validation failed: {e}");
-        }
-        warn!("dev mode validation warning: {e}");
+    let paper_or_live = matches!(
+        cfg.deployment.mode.to_ascii_lowercase().as_str(),
+        "paper" | "live"
+    );
+    validate_startup(&cfg, &symbols, &edge, paper_or_live)
+        .context("startup validation")?;
+    if !paper_or_live {
+        warn!("observer running in dev mode — edge gate skipped");
     }
 
     let registry = SymbolRegistry::from_symbols(&symbols.symbol);

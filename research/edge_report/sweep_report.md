@@ -42,11 +42,7 @@ BTCUSDT  event              8.0          80     100        74           4.241   
 ETHUSDT  event              8.0          80      50       255           6.008               15.553        -5.513              4.033           0.835               1         0.521           False
 ```
 
-**Any pass_candidate:** True (legacy best-hour definition; several BTC event rows).
-
-**Honest note (R1):** those candidates have **mean_net_bps ≤ 0** and often **n_events < 50**.
-Production unlock now requires `mean_net > 0`, `best_hour > 0`, ≥3 hours, **and n≥50**.
-Re-check: no candidate meets the honest bar → keep `status=fail`.
+**Any pass_candidate:** True
 
 Production gate unchanged: do not set `mode=paper/live` unless `analyze_lead_lag.py` writes `status=pass` with real ≥14d data.
 

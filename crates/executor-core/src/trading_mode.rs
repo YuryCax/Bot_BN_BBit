@@ -1,6 +1,6 @@
 //! Live vs paper order gating.
 
-/// True only when deployment mode is live — never for paper/dev/start.
+/// True only when deployment mode is live — never for paper/dev.
 pub fn allow_live_orders(mode: &str) -> bool {
     mode.eq_ignore_ascii_case("live")
 }
@@ -8,7 +8,7 @@ pub fn allow_live_orders(mode: &str) -> bool {
 /// Modes that need edge_profile pass unless allow_unverified_paper.
 pub fn requires_edge_gate(mode: &str, allow_unverified_paper: bool) -> bool {
     match mode.to_ascii_lowercase().as_str() {
-        "live" | "start" => true,
+        "live" => true,
         "paper" => !allow_unverified_paper,
         _ => false, // dev
     }
@@ -22,7 +22,6 @@ mod tests {
     fn paper_never_live_orders() {
         assert!(!allow_live_orders("paper"));
         assert!(!allow_live_orders("dev"));
-        assert!(!allow_live_orders("start"));
         assert!(allow_live_orders("live"));
     }
 

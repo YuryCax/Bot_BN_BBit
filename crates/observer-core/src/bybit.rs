@@ -8,6 +8,8 @@ const BYBIT_WS: &str = "wss://stream.bybit.com/v5/public/linear";
 pub struct BybitTick {
     pub symbol: String,
     pub mid: f64,
+    /// Approximate top-of-book notional (bid×qty + ask×qty) in USD.
+    pub top_depth_usd: f64,
 }
 
 pub async fn stream_bybit_mids(
@@ -49,6 +51,14 @@ pub async fn stream_bybit_mids(
                     .and_then(|r| r.first())
                     .and_then(|x| x.as_str())
                     .and_then(|s| s.parse().ok());
+                let bid_qty: Option<f64> = data
+                    .get("b")
+                    .and_then(|b| b.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|row| row.as_array())
+                    .and_then(|r| r.get(1))
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| s.parse().ok());
                 let ask: Option<f64> = data
                     .get("a")
                     .and_then(|a| a.as_array())
@@ -57,11 +67,21 @@ pub async fn stream_bybit_mids(
                     .and_then(|r| r.first())
                     .and_then(|x| x.as_str())
                     .and_then(|s| s.parse().ok());
+                let ask_qty: Option<f64> = data
+                    .get("a")
+                    .and_then(|a| a.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|row| row.as_array())
+                    .and_then(|r| r.get(1))
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| s.parse().ok());
                 if let (Some(bid), Some(ask)) = (bid, ask) {
                     if bid > 0.0 && ask > 0.0 {
+                        let depth = bid * bid_qty.unwrap_or(0.0) + ask * ask_qty.unwrap_or(0.0);
                         on_tick(BybitTick {
                             symbol: sym.to_string(),
                             mid: (bid + ask) / 2.0,
+                            top_depth_usd: depth,
                         });
                     }
                 }

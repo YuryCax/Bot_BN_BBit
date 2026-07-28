@@ -84,14 +84,7 @@ impl MarketStatePacket {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BybitMidFeed {
-    pub symbol_id: u16,
-    pub bybit_mid: f64,
-    pub ts_ns: u64,
-}
-
-/// Raw Binance bookTicker forward (ADR-003). Observer publishes; Executor decides.
+/// ADR-003: raw Binance forward from Tokyo (postcard on Zenoh).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinanceTick {
     pub symbol_id: u16,
@@ -100,14 +93,12 @@ pub struct BinanceTick {
     pub seq_num: u32,
 }
 
-/// Operator command bus (Panel / Telegram → Executor) on `system/command`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u8)]
 pub enum OperatorAction {
-    HaltEntries = 1,
-    ResumeEntries = 2,
-    FlattenAll = 3,
-    StatusPing = 4,
+    HaltEntries,
+    ResumeEntries,
+    FlattenAll,
+    StatusPing,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +106,13 @@ pub struct OperatorCommand {
     pub action: OperatorAction,
     pub ts_ns: u64,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BybitMidFeed {
+    pub symbol_id: u16,
+    pub bybit_mid: f64,
+    pub ts_ns: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

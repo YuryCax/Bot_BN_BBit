@@ -44,10 +44,13 @@ async fn main() -> anyhow::Result<()> {
     let symbols = SymbolsFile::load(&symbols_path).context("load symbols")?;
     let edge = EdgeProfile::load(&cfg.deployment.edge_profile_path).context("load edge")?;
 
-    let paper_or_live = matches!(cfg.deployment.mode.as_str(), "paper" | "live" | "start");
-    if paper_or_live {
-        validate_startup(&cfg, &symbols, &edge, true).context("startup validation")?;
-    } else {
+    let paper_or_live = matches!(
+        cfg.deployment.mode.to_ascii_lowercase().as_str(),
+        "paper" | "live"
+    );
+    validate_startup(&cfg, &symbols, &edge, paper_or_live)
+        .context("startup validation")?;
+    if !paper_or_live {
         warn!("executor running in dev mode — edge gate skipped");
     }
 
@@ -117,14 +120,14 @@ async fn main() -> anyhow::Result<()> {
         cfg.safe_mode.heartbeat_miss_emergency,
     );
 
-    let mut warm = WarmRiskState {
+    let warm = Arc::new(Mutex::new(WarmRiskState {
         max_daily_dd_futures: cfg.risk.max_daily_drawdown_futures,
         max_funding_rate: 0.0001,
         min_book_depth_usd: 5_000.0,
         book_depth_usd: 50_000.0,
         ..Default::default()
-    };
-    warm.publish();
+    }));
+    warm.lock().unwrap().publish();
 
     let bybit_api = BybitConnector::from_env();
     let live_orders = allow_live_orders(&cfg.deployment.mode);
@@ -167,6 +170,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let lags_by = Arc::clone(&lags);
+    let warm_by = Arc::clone(&warm);
+    let funding_symbols = bybit_symbols.clone();
     tokio::spawn(async move {
         let _ = stream_bybit_mids(&bybit_symbols, move |tick| {
             let Some(symbol_id) = sym_map.get(&tick.symbol).copied() else {
@@ -176,8 +181,35 @@ async fn main() -> anyhow::Result<()> {
                 state.bybit_mid = tick.mid;
                 state.bybit_ts_ns = utc_now_ns();
             }
+            if tick.top_depth_usd > 0.0 {
+                let mut w = warm_by.lock().unwrap();
+                w.book_depth_usd = w.book_depth_usd.max(tick.top_depth_usd);
+                w.publish();
+            }
         })
         .await;
+    });
+
+    let warm_funding = Arc::clone(&warm);
+    let funding_testnet = bybit_api
+        .as_ref()
+        .map(|a| a.testnet)
+        .unwrap_or(true);
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            iv.tick().await;
+            match executor_core::market::poll_max_abs_funding_rate(&funding_symbols, funding_testnet)
+                .await
+            {
+                Ok(rate) => {
+                    let mut w = warm_funding.lock().unwrap();
+                    w.funding_rate = rate;
+                    w.publish();
+                }
+                Err(e) => warn!("funding poll: {e}"),
+            }
+        }
     });
 
     let subscriber = ZenohSubscriber::open().await.context("zenoh subscriber")?;
@@ -232,19 +264,28 @@ async fn main() -> anyhow::Result<()> {
                 match cmd.action {
                     OperatorAction::HaltEntries => {
                         operator_halt = true;
-                        warm.entries_halted = true;
-                        warm.publish();
+                        {
+                            let mut w = warm.lock().unwrap();
+                            w.entries_halted = true;
+                            w.publish();
+                        }
                     }
                     OperatorAction::ResumeEntries => {
                         operator_halt = false;
-                        warm.entries_halted = safe_mode.halt_entries();
-                        warm.publish();
+                        {
+                            let mut w = warm.lock().unwrap();
+                            w.entries_halted = safe_mode.halt_entries();
+                            w.publish();
+                        }
                     }
                     OperatorAction::FlattenAll => {
                         flatten_request = true;
                         operator_halt = true;
-                        warm.entries_halted = true;
-                        warm.publish();
+                        {
+                            let mut w = warm.lock().unwrap();
+                            w.entries_halted = true;
+                            w.publish();
+                        }
                     }
                     OperatorAction::StatusPing => {
                         info!(
@@ -261,14 +302,16 @@ async fn main() -> anyhow::Result<()> {
                 let _ = ts;
                 last_hb = Instant::now();
                 safe_mode.on_heartbeat();
-                warm.entries_halted = operator_halt || safe_mode.halt_entries();
-                // DD from paper ledger vs starting deposit
-                warm.day_pnl_pct = if deposit > 0.0 {
-                    ledger.net_pnl() / deposit
-                } else {
-                    0.0
-                };
-                warm.publish();
+                {
+                    let mut w = warm.lock().unwrap();
+                    w.entries_halted = operator_halt || safe_mode.halt_entries();
+                    w.day_pnl_pct = if deposit > 0.0 {
+                        ledger.net_pnl() / deposit
+                    } else {
+                        0.0
+                    };
+                    w.publish();
+                }
             }
             Some(tick) = tick_rx.recv() => {
                 // Heartbeat is dedicated topic only (ADR-003 / Sprint C) — ticks must not mask feed loss.
@@ -451,7 +494,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                if operator_halt || safe_mode.halt_entries() || warm.entries_halted {
+                if operator_halt || safe_mode.halt_entries() || warm.lock().unwrap().entries_halted {
                     continue;
                 }
 
@@ -572,13 +615,16 @@ async fn main() -> anyhow::Result<()> {
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
                 if last_hb.elapsed() > heartbeat_timeout {
                     safe_mode.on_miss();
-                    warm.entries_halted = operator_halt || safe_mode.halt_entries();
-                    warm.day_pnl_pct = if deposit > 0.0 {
-                        ledger.net_pnl() / deposit
-                    } else {
-                        0.0
-                    };
-                    warm.publish();
+                    {
+                        let mut w = warm.lock().unwrap();
+                        w.entries_halted = operator_halt || safe_mode.halt_entries();
+                        w.day_pnl_pct = if deposit > 0.0 {
+                            ledger.net_pnl() / deposit
+                        } else {
+                            0.0
+                        };
+                        w.publish();
+                    }
                     if safe_mode.phase != SafeModePhase::Normal {
                         warn!(
                             "heartbeat miss phase={:?} consecutive={}",

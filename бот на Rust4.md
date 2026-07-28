@@ -1,17 +1,12 @@
 # 📘 ТЕХНИЧЕСКОЕ ЗАДАНИЕ (ТЗ)
 ## Low-Latency Алготрейдинговая Система: Binance Futures → Bybit Spot/Perpetual
-**Версия:** 2.8  
+**Версия:** 2.4  
 **Дата:** 27.07.2026  
 **Язык разработки:** Rust 1.78+  
-**Среда исполнения:** Linux (Ubuntu 22.04/24.04 LTS), `x86_64` (prod); `aarch64` — scale later  
-**Архитектура:** Trading bot — Rust (`Observer` thin forwarder → `Executor` entry+risk); **Analyst** — offline-советник (§8.6, Фаза 2); **Фаза 3** — validated Analyst → интеграция или 2-й акк (§10.7). Старт: **t3.micro Tokyo + t3.small Singapore** (§2.4). **Ресурсы:** §2.7. **Конфиги:** `config/` (§10.1). **ADR-003** supersedes ADR-001 (Singapore entry). **Deploy:** `deploy/QUICK_DEPLOY.md` (§2.4.1). **Prod money:** `deploy/PRODUCTION.md` (§9.3). **Earn thesis:** `deploy/EARN_THESIS.md` (§1.9).
+**Среда исполнения:** Linux (Ubuntu 22.04/24.04 LTS), `x86_64`/`aarch64`  
+**Архитектура:** Trading bot — Rust (`Observer` → `Executor`); **Analyst** — offline-советник (§8.6, Фаза 2); **Фаза 3** — validated Analyst → интеграция или 2-й акк (§10.7). Старт: **t3.micro Tokyo + t3.small Singapore** (§2.4). **Ресурсы:** §2.7. **Конфиги:** `config/` (§10.1).
 
-> **As-built статус (код = ТЗ v2.8, 2026-07-27):** Наблюдаем **Binance**, исполняем **Bybit**. Вход только при **conviction** (fee-aware EV + latency-adjusted residual + follow-through). Уверенность → масштаб маржи/плеча к max alloc (long/short). Mainnet **закрыт** пока `edge_profile.status=fail` (~−9 bps).  
-> **Changelog v2.8:** §1.9 Earn thesis; `observer_core::conviction` (latency haircut, min net edge, FT gate); `conviction_margin_frac` / `conviction_leverage` — max margin when sure; executor wires conviction before Open. **§8.5 panel as-built:** UI + capital limits + bank profit (no reinvest); `CapitalPolicy` / `RuntimeStatus`.  
-> **Changelog v2.7:** Money-path invariants + unit tests; live entry требует `orderId`; exit/partial fail-closed; §9.3 Production checklist; `scripts/check_production_ready.ps1`; `deploy/PRODUCTION.md`. **Реальные деньги запрещены** пока `status!=pass`. Fail-closed ветки: нет Bybit mid / NaN / unknown book depth → Skip; Invalidation только при flip residual+impulse (не при `direction_bias=0`); MICRO imbalance+delta; forecast NaN → no trade.  
-> **Changelog v2.6:** ТЗ синхронизирован с runtime: Zenoh **TCP** (не UDP); §2.1 SG = **t3.small**; §2.4.1 one-shot pack/push (`package_release.sh` / `push_node.sh`); §3 Observer = **только** `BinanceTick` forward (Entry/math в `observer-core`, **хост = Executor**); §5.4 as-built = trail/fee-BE/partial по Bybit PnL (**full Binance Z/Vel adaptive — TODO**); funding/basis warm poller — **TODO**; §9.1 testnet analytics ladder; §9.2 deploy без полного git clone на нодах.  
-> **Changelog v2.5 (код 2026-07-27):** ADR-003 runtime: sign-aware long/short residual; fee gate в **bps**; wall-clock impulse 100 ms; Bybit MICRO (`orderbook.1`+`publicTrade`); dynamic SL/TP (trail/fee-BE/partial + exchange stop sync); `ForecastEngine` EV-gate; testnet analytics (`BOT_TESTNET_ANALYTICS` на **observer+executor**); Bybit public WS → testnet при `BYBIT_TESTNET=1`; instruments qtyStep/minQty + set_leverage. Spot off. Edge research **fail** (~−9 bps).  
-> **Changelog v2.4:** **ADR-003 Singapore entry** — Tokyo = raw Binance tick forwarder; Executor владеет Entry §7 + local Bybit mid; reverse mid не нужен для входа. Gate §9.0: real L2 ≥14d, `data_source != synthetic`. Разделены `book_slippage_bps` и `max_adverse_move_bps`. Paper leverage ×3–×5.  
+> **Changelog v2.4:** [ADR-003](docs/adr/003-singapore-entry.md) — Tokyo **thin forwarder** (`BinanceTick` + heartbeat); **Entry §7 + LagState** на Executor с **локальным Bybit mid**; reverse `system/bybit_mid` не вход для entry. §9.0/§9.1: injected latency = **возраст forwarded tick**; production pass только **real L2 ≥14d** (`data_source` ≠ synthetic). Разделение **`max_slippage_bps`** (book/L2) vs **`max_adverse_move_bps`** (kill после decide).  
 > **Changelog v2.3:** §3.5 **единый lag pipeline** (Observer-only, staleness, fail-closed); `packet_version = 3` синхронизирован; MVP `symbols.toml` — **futures-only**; §2.3 помечен `[scale-only]`; paper/live Singapore → **t3.small**; канонические конфиги в `config/`; ADR `docs/adr/`.  
 > **Changelog v2.2:** §10.7 **Фаза 3** — валидация Analyst, graduated auto-apply, путь A (интеграция) / B (отдельный Bybit-акк).  
 > **Changelog v2.1:** §2.7 **принципы ресурсоёмкости** — RAM/CPU budget t3.micro, lean deps, WS limits, запрет перегруза hot path.  
@@ -35,13 +30,13 @@
 | **Назначение** | Автоматизированная **кросс-биржевая импульсная торговля (lead-lag / follow-through)** с минимальной задержкой. **Источник alpha:** измеренный **lag Binance→Bybit** — импульс на Binance Futures, Bybit **ещё не догнал**, вход на Bybit, выход при **схлопывании lag** или invalidation (§1.7, §5.2). Binance — сигналы и SL/TP-метрики; Bybit — исполнение и `MICRO_OK`. Basis filter (§4.2) отсекает gap > 0.05%. **Не** классический lag-arb уже открытого gap и **не** «наблюдение ради наблюдения». |
 | **Главная цель** | **Доказать и эксплуатировать положительный net edge** после комиссий (§1.7, §6.3). Рост депозита, не слив. Бот **не торгует** без `net_edge_est > 0` и режима с достаточным follow-through (§7). В позиции — адаптивный SL/TP по Binance (§5.4). |
 | **Приоритет рынков** | **Futures-first:** основной edge из‑за меньших комиссий и Long/Short. Spot — **фаза 2**, только после paper PF ≥ 1.3 на futures (§6.0, §9.1). |
-| **Принцип разделения** | `Observer` (Токио) = **thin forwarder**: Binance Futures WS → parse → Zenoh `binance/tick/{id}` (**без** `entry_valid`).<br>`Executor` (Сингапур) = local Bybit mid + **полная оценка входа §7** + Risk Engine + исполнение + Position Manager.<br>**Дублирование entry на Observer запрещено (ADR-003).** |
+| **Принцип разделения** | `Observer` (Токио) = **тонкий forwarder:** Binance Futures WS → `BinanceTick` + heartbeat на Zenoh; **не** выставляет `entry_valid`.<br>`Executor` (Сингапур) = локальный Bybit mid/book + **Entry Engine §7** + `LagState` + Risk → ордер, позиция, exit EMA.<br>**Дублирование entry-логики на Observer запрещено** (ADR-003). |
 | **Технологический стек** | **Trading (Rust):** `tokio`, `simd-json`, `zenoh`, `postcard`, `crossbeam`, `tracing`, `prometheus`, `rustls`, `teloxide`, Control Panel (`axum`). **Analyst (§8.6, отдельный сервис):** Python 3.11+ / TypeScript, LLM API — **не** в Rust binary. **Ресурсоёмкость:** §2.7 (lean crates, budget t3.micro). |
-| **Инфраструктура (старт)** | **t3.micro Tokyo** (Observer forwarder) + **t3.small Singapore** (Executor + Panel): VPC Peering. ~$15–25/мес. См. §2.4, §2.5. Mono-node — только отладка (§2.6). |
+| **Инфраструктура (старт)** | **t3.micro Tokyo** (Observer) + **t3.small Singapore** (Executor + Panel): VPC Peering. ~$15–25/мес. См. §2.4, §2.5. Mono-node — только отладка (§2.6). |
 | **Инфраструктура (scale)** | При росте пар/RAM → t3.small; при депозите $3k+ и PF → c7a.xlarge (§2.5). |
 | **Стартовый депозит** | **$300 USDT** futures (Bybit); spot off. Allocation см. §6.0, §10.1. |
-| **Стартовые пары** | **2–3** futures (`BTCUSDT`, `ETHUSDT`, опц. `SOLUSDT` только после real L2 pass); расширение до 35 **без рефакторинга** (§1.5, §3.4). |
-| **Плечо (старт)** | **×3** paper (`default_leverage_futures`); max **×5** до proven expectancy. ×10+ только после paper PF≥1.2. ×50 **запрещён**. |
+| **Стартовые пары** | **2–3** futures (`BTCUSDT`, `ETHUSDT`, опц. `SOLUSDT`); расширение до 35 **без рефакторинга** (§1.5, §3.4). |
+| **Плечо (старт)** | **×10** (`default_leverage_futures`); max **×20** (§6.2). ×50 **запрещён** — комиссии и ликвидация уничтожают edge на $300. |
 | **Допустимые инструменты** | Whitelist: 20–35 пар. Стартовый набор — `config.toml` / `symbols.toml`. **Добавление и остановка пар в runtime** — только через Панель управления (§8.5) с hot-reload; произвольная подписка без оператора запрещена. |
 | **Ключевые ограничения** | One-way latency Токио→Сингапур P95 ≤ 80 мс, P99 ≤ 110 мс. Freshness drop > 150 ms. Hot path Risk Engine ≤ 10 мкс (§4.2). Проскальзывание входа ≤ 0.05%. Максимальный дневной DD: Spot ≤ 2%, Futures ≤ 1.5%. |
 | **Этапы разработки** | **Ф0** Edge Research (§9.0) → **Ф1** бот + Panel → **Ф2** БД + Analyst + Apply (§8.6–8.7) → **Ф3** validated Analyst: интеграция или 2-й акк (§10.7). Ф2–Ф3 **не блокируют** live Ф1. |
@@ -50,34 +45,34 @@
 
 | Узел | Регион AWS | Роль | Ключевые задачи |
 |------|------------|------|-----------------|
-| **Observer** | `ap-northeast-1` (Токио) | Thin forwarder | Binance Futures WS → parse → Zenoh `binance/tick/{id}` (**без** entry) |
-| **Executor** | `ap-southeast-1` (Сингапур) | Entry + Execution & Risk | Local Bybit mid + Entry §7 + Risk → Bybit orders → Position Manager |
+| **Observer** | `ap-northeast-1` (Токио) | Forwarder | Binance Futures WS → parse → **Zenoh `binance/tick/{id}`** + heartbeat |
+| **Executor** | `ap-southeast-1` (Сингапур) | Entry + Execution | Binance tick + **local Bybit mid** → Entry §7 → Risk → Bybit → Position Manager |
 
 ```
 [ Binance Futures WS ]
           ↓ (10–30 ms)
 [ Server A: Observer ] — AWS Tokyo (ap-northeast-1)
-   • simd-json parser (bookTicker mid)
-   • Zenoh publish BinanceTick + heartbeat (TCP 7447, VPC private)
-          ↓ (50–80 ms P95 via AWS Backbone, private IP only)
+   • simd-json parser
+   • RingBuffer + Welford/Z/EMA/ATR
+   • Entry Engine (§7) → entry_valid + direction_bias
+   • Zenoh Publisher (UDP)
+          ↓ (50–80 ms P95 via AWS Backbone)
 [ Server B: Executor ] — AWS Singapore (ap-southeast-1)
-   • Zenoh subscribe ticks + freshness (age of Binance tick ≤150 ms)
-   • Local Bybit mid + MICRO (orderbook.1 + publicTrade)
-   • Entry Engine (§7) + LagState + ForecastEngine EV + follow-through
-   • Risk Engine (adverse_move ≠ book_slippage) + warm flags
-   • Position Manager (trail / fee-BE / partial + Lag Convergence + Time Stop)
+   • Zenoh Subscriber + Freshness Check (≤150 ms)
+   • Risk Engine hot path (<10μs) + warm cache
+   • Router → BybitSpotConnector / BybitFuturesConnector
+   • Bybit V5 Private WS Execution
+   • Position Manager (SL/TP state machine §5, Bybit EMA exits)
           ↓
-[ Bybit API ] → USDT Perpetual (default TESTNET; mainnet gated)
+[ Bybit API ] → Spot / USDT Perpetual (Long / Short*)
 ```
+*Short на Spot — только при `spot_margin_enabled = true` (§4.3).
 
-**Ключевые принципы (v2.6 / ADR-003):**
-1. **Токио не знает про ордера и не решает вход** — только forward ticks + heartbeat.
-2. **Сингапур считает entry** на **локальном** Bybit mid + возрасте forwarded Binance tick.
-3. **Spot и Futures разделены** на уровне коннекторов и депозитов (§6.0); Spot **фаза 2 / off**.
-4. **Long и Short** — симметричная логика (§7); residual **sign-aware**.
-5. **`book_slippage_bps`** (L2 VWAP / sizing) **≠** **`max_adverse_move_bps`** (kill если Bybit уже догнал сигнал).
-6. **Между нодами — только private IP** (Zenoh TCP). Публичный интернет — только к своей бирже.
-7. **Mainnet закрыт**, пока `edge_profile.meta.status != "pass"`.
+**Ключевые принципы:**
+1. **Токио не знает про ордера** — не хранит позиции, баланс, статус исполнения.
+2. **Сингапур не пересчитывает entry-метрики** — использует `entry_valid`, `direction_bias`, `d_exp`, `d_min` из пакета; локально считает только **Bybit EMA** для exit-триггеров (§5.3).
+3. **Spot и Futures разделены на уровне коннекторов и депозитов** (§6.0): отдельные кошельки Bybit, отдельные лимиты капитала и команды остановки; маршрутизация через `symbols.toml`.
+4. **Long и Short** — симметричная логика входа/выхода с инверсией условий (§7).
 
 ### 1.5. Масштабирование пар без рефакторинга (заложить в код с первого дня)
 
@@ -158,71 +153,55 @@ edge_per_trade ≈ f(lag_residual, follow_through, exit_timing)
 БЫСТРО (мс)                         МЕДЛЕННО (мин–часы)
 ───────────                         ──────────────────
 Binance WS → Observer (Rust)        Analyst (Фаза 2, offline)
-  thin forward BinanceTick            regime, alloc, tuning
+  lag, Z, Vel, entry_valid            regime, alloc, tuning
   50–150 ms                           cron / по событию
        ↓                                    ↓
-Executor: Entry §7 + Bybit               Suggestion → [Apply] → Operator
-  local mid, risk, SL/TP, convergence
+Executor → Bybit                         Suggestion → [Apply] → Operator
+  исполнение, SL/TP, convergence
 ```
 
 | Компонент | Создаёт edge? | Роль в деньгах |
 |-----------|---------------|----------------|
-| **Observer** | Доставляет сигнал | Thin forwarder: mid/ts/seq (+ heartbeat); **не** `entry_valid` |
-| **Executor** | **Да** (hot path) | Local Bybit mid + Entry §7 + Risk + order + convergence exit |
+| **Observer** | **Да** (hot path) | Ловит импульс, проверяет lag open, `entry_valid` |
+| **Executor** | Нет | Исполнение, convergence exit, fee-aware sizing |
 | **Analyst (ИИ)** | **Нет** | **Фильтр режима:** когда бот ON/OFF, alloc между 2–3 парами, tuning порогов; **Apply only** |
 | **Operator** | Нет | Финальное «да» на предложения Analyst |
 
 > **Запрещено:** LLM/Analyst в hot path входа; auto-apply; торговля без прохождения §9.0 Edge Research.
 
-### 1.9. Earn thesis — уверенный вход и максимальная маржа
-
-**Канон:** [`deploy/EARN_THESIS.md`](deploy/EARN_THESIS.md).
-
-| Принцип | Реализация |
-|---------|------------|
-| Наблюдаем **Binance**, не торгуем на нём | Tokyo `observer` → `BinanceTick` only |
-| Решения и ордера — **Bybit** margin (long/short) | Singapore `executor` |
-| Только сделки, в которых **уверены** | `conviction::is_confident`: `e_net ≥ min_net_edge`, capture ≥ fees, FT, latency haircut residual ≥ `lag_min` |
-| Учёт **задержки** в точке входа | `latency_adjusted_residual(age, max_latency)` |
-| Все **комиссии и буфер** в EV | `ForecastEngine` fee_rt_bps; entry fee gate bps |
-| **Max маржа** при высокой conviction | `conviction_margin_frac` → к `futures_alloc_pct`; `conviction_leverage` → к `max_leverage` |
-| Нет уверенности | **qty = 0**, ордер не шлём |
-| Исторический parallel | `edge_profile` research ≥14d; mainnet только `status=pass` |
-
-> Цель кода — **зарабатывать net после всех вычетов**, когда параллель математически и исторически подтверждена. При `status=fail` система **обязана** отказать в mainnet (не «торговать надеждой»).
-
-### 1.2. Принятие решения о входе (единственный источник — Executor / ADR-003)
+### 1.2. Принятие решения о входе (единственный источник — Observer)
 
 ```
-[Tokyo] BinanceTick → Zenoh binance/tick/{id}
-       ↓
-[Singapore] Local Bybit mid + Metrics (Z, Vel, EMA, ATR) + LagState
+[Tick Binance] → Noise Filter → Metrics (Z, Vel, EMA, ATR, regime)
        ↓
   Entry Engine (§7): D_exp, D_min_net, Z_threshold, regime matrix, **lag gates §3.5**
        ↓
-  entry_valid = 1  ∧  lag open  ∧  direction_bias ∈ {-1, +1}
+  entry_valid = 1  ∧  lag open  ∧  direction_bias ∈ {-1, +1}  →  публикация пакета
+  иначе            →  entry_valid = 0, direction_bias = 0
        ↓
-  Freshness (age of forwarded Binance tick) + Dedup + Risk Engine (§4.2)
+[Executor] Freshness + Dedup + Risk Engine (§4.2)
        ↓
-  entry_valid = 1  ∧  adverse_move OK  ∧  risk flags OK  →  open_position(direction_bias)
+  entry_valid = 1  ∧  все risk-флаги OK  →  open_position(direction_bias)
   иначе            →  RISK_SKIP / drop
 ```
 
-**Observer не вычисляет §7.** `MarketStatePacket` пишется на Executor для audit/replay после локальной оценки.
+**Executor не вызывает формулы §7 для входа.** Поля `d_exp`, `d_min`, `sigma` в пакете — для аудита, логов и метрик, не для пересчёта.
 
 ### 1.3. Логическая цепочка (Binance → Bybit)
 
 ```
-НАБЛЮДЕНИЕ     FORWARD                 АНАЛИЗ + РЕШЕНИЕ         СОПРОВОЖДЕНИЕ
-(Binance WS)   (Observer Tokyo)        (Executor Singapore)     (Executor)
+НАБЛЮДЕНИЕ     АНАЛИЗ + РЕШЕНИЕ          ДЕЙСТВИЕ              СОПРОВОЖДЕНИЕ
+(Binance WS)   (Observer)               (Executor → Bybit)    (Executor)
      │              │                          │                    │
-  bookTicker    BinanceTick            Entry §7 + LagState      SL/TP §5.4→§5.5
-  (mid)         heartbeat              Risk + adverse_move      + Bybit triggers §5.2
-                     │                          │
-                     └── Zenoh tick ──→ local Bybit mid → order
+  aggTrade      Z, Vel, EMA, ATR         Risk Engine           SL/TP §5.4→§5.5
+  bookTicker    Entry Engine §7          open / close          (метрики Binance)
+  depth         entry_valid              Spot / Futures        + триггеры Bybit §5.2
+                direction_bias
+                     │
+                     └── MarketStatePacket ──→ (freshness ≤150 ms)
 ```
 
-**Правило (ADR-003):** Tokyo **форвардит** Binance mid; Singapore **решает вход** на local Bybit mid. Bybit — **единственный источник цены исполнения** и microstructure (`MICRO_OK`, §4.2).
+**Правило:** Binance — **единственный источник решения о входе** и **адаптации SL/TP в позиции**. Bybit — **единственный источник цены исполнения** (mid, spread, depth) и **microstructure filter** для входа (`MICRO_OK`, §4.2).
 
 ### 1.4. Единицы измерения (обязательны для реализации)
 
@@ -243,32 +222,24 @@ Executor: Entry §7 + Bybit               Suggestion → [Apply] → Operator
 
 ### 2.1. Размещение и соединения
 - **Сервер A (Observer):** AWS `ap-northeast-1`. **Старт:** `t3.micro`. **Scale:** `c7a.xlarge` (§2.5).
-- **Сервер B (Executor):** AWS `ap-southeast-1`. **Старт:** `t3.small` (не micro — OOM risk с panel/telegram). **Scale:** `c7a.xlarge`.
-- **Сетевой мост:** `AWS VPC Peering` или `Transit Gateway`. Трафик **между узлами** — **только private IP** AWS backbone. Публичный интернет — **только** к API бирж своего региона (Tokyo→Binance, SG→Bybit), NTP, Telegram, Prometheus.
+- **Сервер B (Executor):** AWS `ap-southeast-1`. **Старт:** `t3.micro`. **Scale:** `c7a.xlarge`.
+- **Сетевой мост:** `AWS VPC Peering` или `Transit Gateway`. Трафик между узлами идёт исключительно по внутренним IP через магистральную сеть AWS. Выход в публичный интернет разрешён только для API бирж, NTP, Telegram, Prometheus, Email.
 - **Реальные метрики one-way latency** (`utc_now_ns() − packet.ts_ns` на Executor): P95: 50–80 мс, P99: 90–110 мс, Jitter: ≤ 5 мс.
-- **Security group:** TCP **7447** только между private CIDR нод (не `0.0.0.0/0`).
 
 ### 2.2. Протокол межсерверного обмена
 - **Библиотека:** `zenoh` v1.0+
-- **Транспорт (as-built):** **TCP** порт **7447** (`config/zenoh-tokyo.json5`, `config/zenoh-singapore.json5`). Endpoints вида `tcp/<PRIVATE_IP>:7447`. Multicast scouting **выключен** на dual-node.
-- **Почему не UDP в prod:** VPC peering + predictable reconnect проще на TCP; latency budget edge всё равно доминирует hop Tokyo↔SG, не L4. UDP остаётся опцией research/scale, не текущий дефолт.
-- **Обязателен `seq_num`** в каждом `BinanceTick` — детект gap/dedup даже на TCP (session restart, буфер overflow).
-- **Сериализация:** `postcard` + **версия схемы** `packet_version: u8` (текущая = **`3`**). При изменении структуры — инкремент версии; узлы с несовместимой версией не стартуют.
-- **Топики (ADR-003):**
-  - `binance/tick/{symbol_id}` — raw `BinanceTick` (mid, ts_ns, seq) из Tokyo
-  - `system/heartbeat/tokyo` — Tokyo heartbeat каждые 100 ms (`ts_ns`); **тики не заменяют heartbeat**
-  - `system/command` — Panel/Telegram → Executor (halt/resume/flatten)
-  - `system/bybit_mid/{symbol_id}` — **deprecated for entry** (optional audit/mono-node)
-  - Local `MarketStatePacket` log на Executor после Entry §7 (replay / `BOT_PACKET_LOG`)
-- **Частота tick forward:** по Binance bookTicker (cap `zenoh_publish_hz_cap`).
-- **Heartbeat:** пропуски → поэтапный Safe-Mode (§5.2.1); emergency при timeout > 500 ms.
-- **Таймстампы:** `ts_ns` = **UTC wall-clock** (`CLOCK_REALTIME`). Синхронизация: `chrony` stratum ≤ 2. **Запрещено** `CLOCK_MONOTONIC` в межузловых пакетах.
-- **Политика потерь / gap (seq):**
+- **Транспорт:** UDP (порт 7447), без гарантии доставки; **обязателен `seq_num`** в каждом пакете для детекции потерь и дедупликации.
+- **Сериализация:** `postcard` + **версия схемы** `packet_version: u8` (текущая = **`3`** v2.0: поля lag §10.4). При изменении структуры — инкремент версии; узлы с несовместимой версией не стартуют.
+- **Топик:** `market/binance/{symbol_id}`
+- **Частота публикации:** 50–100 Гц в штатном режиме, до 500 Гц при `|Z| ≥ Z_threshold`.
+- **Heartbeat:** Отдельный топик `system/heartbeat/tokyo`, пакет с `ts_ns` каждые 100 ms. Пропуски → поэтапный Safe-Mode (§5.2.1); emergency при timeout > 500 ms.
+- **Таймстампы:** `ts_ns` = **UTC wall-clock** (`CLOCK_REALTIME`, наносекунды с эпохи). Синхронизация: `chrony` со stratum ≤ 2 на обоих узлах. **Запрещено** использовать `CLOCK_MONOTONIC` в межузловых пакетах.
+- **Политика потерь UDP:**
   - **Dedup:** `seq_num <= last_seq_num[symbol_id]` → drop.
   - **Gap detection:** `seq_num > last + 1` → `seq_gap_count++`, лог `WARN`.
   - **Gap storm:** если `seq_gap_count > 10` за 1 с по символу → `pause_entries[symbol_id]` на 5 с, алерт.
   - Потерянные пакеты **не интерполируются**; следующий валидный пакет принимается как есть.
-- **Safe-Mode latency:** age of forwarded Binance tick P95 > **150 ms** → Safe-Mode фаза 1. Измерение — `utc_now_ns() − tick.ts_ns`.
+- **Safe-Mode RTT:** скользящий P95 one-way latency за 10 с > **150 ms** → Safe-Mode фаза 1 (§5.2.1). Измерение — `utc_now_ns() − packet.ts_ns`.
 
 ### 2.3. Настройки ОС и ядра (Linux Tuning)
 
@@ -304,7 +275,7 @@ SO_RCVBUF/SO_SNDBUF=131072 для Binance/Bybit сокетов
 
 ### 2.4. Стартовый deploy: t3.micro Tokyo + t3.small Singapore
 
-**Выбранная конфигурация paper/live** (депозит $300, **2–3 пары futures**, ×3):
+**Выбранная конфигурация paper/live** (депозит $300, **2–3 пары futures**, ×10):
 
 | Узел | Регион | Instance | Процесс | RAM budget |
 |------|--------|----------|---------|------------|
@@ -313,26 +284,10 @@ SO_RCVBUF/SO_SNDBUF=131072 для Binance/Bybit сокетов
 
 > **Почему t3.small в Singapore:** executor + panel + telegram на 1 GiB micro дают OOM-jitter → потеря исполнения = потеря edge. Tokyo (только Observer) остаётся micro.
 
-- Связь: Zenoh **TCP 7447** + VPC Peering (§2.2) — **private IP only**.
+- Связь: Zenoh UDP + VPC Peering (§2.2).
 - Пары на старте: `BTCUSDT`, `ETHUSDT` (+ опц. `SOLUSDT`) — **только futures** (`config/symbols.toml`).
 - Spot: **off** (`spot_enabled = false`).
-- Edge Research (§9.0) **до** paper/mainnet — без `edge_profile.status = "pass"` live mainnet запрещён.
-- Default live orders: **Bybit TESTNET** (`BYBIT_TESTNET=1`). Mainnet: `BOT_ALLOW_MAINNET=1` + edge pass.
-
-#### 2.4.1. Быстрый деплой (обязательный ops-путь)
-
-> Полный git clone + `cargo build` на t3.micro **запрещён** как штатный деплой (RAM/CPU). Собирать архивы на Linux x86_64 (WSL/CI/bastion), на ноды — только tarball.
-
-| Шаг | Команда / артефакт |
-|-----|-------------------|
-| 1. Pack | `./deploy/package_release.sh` → `dist/tokyo.tgz`, `dist/singapore.tgz` |
-| 2. Push+install | `./deploy/push_node.sh singapore user@SG_PRIVATE --install` затем `tokyo` |
-| 3. Edit | SG: `/etc/bot/zenoh.json5` (`TOKYO_PRIVATE_IP`) + `/etc/bot/secrets.env`; Tokyo: `SG_PRIVATE_IP` |
-| 4. Start | `systemctl enable --now executor` **сначала**, затем `observer` |
-
-Альтернатива из полного репо на ноде: `sudo ./deploy/install_linux.sh observer|executor`.  
-Канон: [`deploy/QUICK_DEPLOY.md`](deploy/QUICK_DEPLOY.md), [`deploy/DUAL_NODE.md`](deploy/DUAL_NODE.md).  
-Windows host: `.\scripts\package_release.ps1 -Wsl` (бинари должны быть Linux ELF).
+- Edge Research (§9.0) **до** paper — без `edge_profile.toml` с `net_edge_bps > 0` live запрещён.
 
 ### 2.5. Эволюция инфраструктуры
 
@@ -468,35 +423,40 @@ Prometheus rules: §8.2 + `bot_resource_budget_exceeded`.
 
 ---
 
-## 3. Модуль Observer (Токио) — Thin forwarder (ADR-003)
-
-> **As-built:** бинарь `observer` публикует только `BinanceTick` + heartbeat. Математика, LagState, EntryEngine, Forecast живут в crate **`observer-core`**, но **хостятся на Executor (Singapore)**. Дублирование entry на Tokyo **запрещено**.
+## 3. Модуль Observer (Токио) — Сбор, парсинг, математика, Entry Engine
 
 ### 3.1. Подключения к Binance Futures
-- Endpoint: `wss://fstream.binance.com/ws` (Paper/test: `wss://stream.binancefuture.com/ws` при необходимости)
-- Потоки на пару (старт): **`@bookTicker`** (mid). `@aggTrade` / `@depth10@100ms` — **только если** `depth_enabled = true` (§2.7.2; по умолчанию **false**)
-- Коннекторы: **старт** 1–2 WS; **scale** до 4–6 conn × 5–8 пар (§2.7.2).
-- **Старт (`t3.micro`):** `tokio` worker threads = **2**; без `taskset`.
-- Reconnect: Exponential backoff (1s → 2s → 4s → max 30s).
+- Endpoint: `wss://fstream.binance.com/ws` (Paper: `wss://stream.binancefuture.com/ws`)
+- Потоки на пару: `@aggTrade`, `@bookTicker`; `@depth10@100ms` — **только если** `depth_enabled = true` (§2.7.2, по умолчанию **false** на `mode = start`)
+- Коннекторы: **старт** 1–2 WS (все пары на conn); **scale** до 4–6 conn × 5–8 пар (§2.7.2).
+- **Старт (`t3.micro`):** `tokio` worker threads = **2** (1 IO + 1 compute); без `taskset` pinning.
+- **Scale:** каждое соединение может быть привязано к ядру через `on_thread_start`.
+- Reconnect: Exponential backoff (1s → 2s → 4s → max 30s), восстановление RingBuffer из последних сохранённых тиков.
 
-> **Примечание:** Binance **Spot** не используется как источник. Сигналы — Binance Futures; исполнение — Bybit Perpetual (Spot — фаза 2).
+> **Примечание:** Binance **Spot** не используется как источник данных. Сигналы генерируются по фьючерсному рынку Binance; исполнение — на Bybit Spot или Perpetual по маппингу в `symbols.toml`.
 
-### 3.2. Парсинг
-- Библиотека: `simd-json`
-- Извлечение mid из bookTicker (`b`/`a`); `ts_ns` = wall-clock UTC; `seq` монотонный per process.
-- Zero-copy где возможно; **нет** Entry / Z / ATR на Tokyo binary.
+### 3.2. Парсинг и фильтрация шума
+- Библиотека: `simd-json` (AVX2/NEON оптимизация)
+- Partial Deserialization: Извлечение только полей `p` (price), `q` (quantity), `T` (trade time), `m` (isBuyerMaker), `b`/`a` (bookTicker).
+- Zero-Copy: Данные передаются из сетевого буфера напрямую в аналитический контекст без `Vec::clone` или `String::from`.
+- **Фильтры:**
+  - `Volume Threshold`: `trade.volume_usd < $10,000` → игнор.
+  - `Spread Validation`: Обновление цены принимается только если подтверждено `@aggTrade` или изменением `bookTicker` за < 50 мс.
+  - `Clock Sync`: Сверка `Binance.event_time` (UTC ms) с локальным `CLOCK_REALTIME`. Отклонение > 50 мс → лог `WARN`, коррекция offset в `exchange_clock_offset_ns`.
 
-### 3.3. Математическое ядро и Entry Engine (хост = Executor)
-
-Код в `crates/observer-core` (`math`, `entry`, `lag`, `forecast`, `bybit`), **запуск** — `executor-bin`:
-
-- **RingBuffer / SymbolMetrics:** pre-alloc на пару; wall-clock `price_ago_ms(100)` для impulse (**не** sample-count).
-- **Velocity / EMA / ATR / Z / regime:** на Executor по forwarded Binance mid (+ local history).
-- **LagState:** `lag_bps`, `impulse_bps_100ms`, **sign-aware** `lag_residual_bps` (long/short; без `.max(0)`).
-- **EntryEngine §7:** `D_min_net` / fee gate в **bps**; `net_edge_est`; `entry_valid`, `direction_bias`.
-- **ForecastEngine:** conditional EV — вход только если `e_net_bps > 0` и направление согласовано.
-- **MICRO_OK:** Bybit `orderbook.1` + `publicTrade` (imbalance / volume_delta / depth) на Executor.
-- **Публикация с Tokyo:** только `BinanceTick` (postcard) → Zenoh. `MarketStatePacket` — **local log** на Executor после оценки (replay).
+### 3.3. Математическое ядро и Entry Engine
+- **RingBuffer:** `Box<[f64; 2048]>` на пару. Lock-free запись/чтение (`crossbeam-queue` или атомарный индекс). Размер: ~16 КБ на пару.
+- **Инкрементальный Z-Score:** Алгоритм Welford. $O(1)$ обновление среднего и дисперсии. Окно: 1000 тиков.
+- **Velocity:** `(P_now − P_100ms_ago) / P_100ms_ago / 0.1` — **доля/с** (§1.3). Фильтр затухания: если $\frac{d^2P}{dt^2} < 0$, `d_exp` умножается на 0.7 перед сравнением с `D_min`.
+- **Triple EMA:** EMA(50), EMA(200), EMA(500) по тикам. В пакет передаются `ema_50` и `ema_200`; EMA(500) используется локально для regime filter.
+- **ATR(14):** Инкрементальный расчёт на тиках. Фильтр микро-флета: `ATR / price < 0.2%` → `entry_valid = 0`.
+- **Regime Detection:** `TrendStrength = |EMA_50 - EMA_200| / ATR`. `regime: u8` (0=Range, 1=Transition, 2=Trend) — см. матрицу §7.
+- **Микроструктурные метрики:** `bid_ask_imbalance`, `volume_delta_100ms` — из `@bookTicker` + `@aggTrade`; передаются в пакете **только для аудита**. Фильтр `MICRO_OK` на входе — по **Bybit** (§4.2 warm path), не по Binance delta.
+- **Z_threshold (приоритет):**
+  - `use_dynamic_thresholds = false` → `z_score_entry` из config (по умолчанию 2.5).
+  - `use_dynamic_thresholds = true` → `Z_threshold = clamp(percentile(|Z|, 5000, 0.95) × 1.1, 1.8, 3.2)`; **`z_score_entry` игнорируется**.
+- **Entry Engine (после метрик):** вычисляет `D_min_net`, `D_exp`, проверяет условия §7; выставляет `entry_valid`, `direction_bias`, записывает `d_exp`, `d_min`, `sigma`, `z_threshold_used` в пакет (`d_min` = `D_min_net`).
+- **Публикация:** `MarketStatePacket` → `postcard` → Zenoh. Batching ≤ 1 мс.
 
 ### 3.4. SymbolRegistry (§1.5 — код)
 
@@ -519,76 +479,72 @@ impl SymbolRegistry {
 
 ### 3.5. Lag Telemetry и Follow-through (Edge Research + runtime)
 
-> **Источник edge = lag, который ещё открыт.** Устаревший Bybit mid → ложные входы. Под **ADR-003** lag и `entry_valid` считаются **только на Executor** с **локальным** Bybit mid; Tokyo только форвардит Binance tick.
+> **Источник edge = lag, который ещё открыт.** Неверный или устаревший `bybit_mid` → ложные входы → комиссии без PnL. Lag считается **только на Observer**; Executor **не пересчитывает** entry lag (§1.2, §4.1).
 
-#### 3.5.1. Единый lag pipeline (ADR-003)
+#### 3.5.1. Единый lag pipeline (канонический путь)
 
 ```
-[Binance WS] → Observer (Tokyo) → Zenoh binance/tick/{id}  (raw mid, ts_ns, seq)
-       ↓
-[Bybit WS] → Executor local mid + ts_ns
-       ↓ merge на Executor
-  Entry Engine §7: lag_bps, lag_residual_bps, entry_valid
-       ↓ MarketStatePacket (local log / replay)
-  Risk (adverse_move ≠ book_slip, MICRO_OK, BASIS_OK) → open
+[Bybit WS] → Executor warm path → bybit_mid + ts_ns
+       ↓ Zenoh topic system/bybit_mid/{symbol_id}  (50 Hz, §10.1)
+[Observer] → merge с binance_mid (local, real-time)
+       ↓ Entry Engine §7: lag_bps, lag_residual_bps, entry_valid
+       ↓ MarketStatePacket (поля lag_* для audit + exit §5.2)
+[Executor] → freshness + Risk (MICRO_OK, BASIS_OK) → open
 ```
 
 | Компонент | Ответственность |
 |-----------|-----------------|
-| **Observer** | Forward `BinanceTick` + `system/heartbeat`; **не** считает lag/entry |
-| **Executor** | Local Bybit mid; единственный калькулятор `lag_*` + `entry_valid`; Risk + order |
-| **Audit (optional)** | `system/bybit_mid/{id}` — только mono-node/audit; **не** вход для entry |
+| **Executor** | Публикует `{ bybit_mid, ts_ns, symbol_id }` на `system/bybit_mid/{symbol_id}`; частота **50 Hz** (`bybit_mid_feed_hz`) |
+| **Observer** | Единственный калькулятор `lag_bps`, `lag_residual_bps`, `entry_valid` lag-gates |
+| **Executor (entry)** | Использует `entry_valid` + `lag_*` из пакета; **warm merge на Executor для entry запрещён** |
 
-**Staleness (fail-closed):**
+**Staleness (fail-closed — без денег на «угадывании»):**
 ```rust
-let bybit_age_ms = (utc_now_ns() - lag_state.bybit_ts_ns) / 1_000_000;
-if bybit_age_ms > bybit_mid_max_staleness_ms {  // default 200 ms
-    entry_valid = 0;  // local Bybit mid unknown
+let age_ms = (utc_now_ns() - bybit_feed.ts_ns) / 1_000_000;
+if age_ms > bybit_mid_max_staleness_ms {  // default 200 ms
+    entry_valid = 0;  // lag unknown — не торгуем
 }
-let tick_age_ns = utc_now_ns() - binance_tick.ts_ns;
-if tick_age_ns > 150_000_000 { drop(tick); }  // forwarded Binance too old
 ```
 
-**Heartbeat (не любой packet):**
-- Observer публикует `system/heartbeat/tokyo` ~10 Hz.
-- Miss → Safe-Mode фаза 1+ (§5.2.1); тики **не** маскируют потерю heartbeat.
+**Fallback при потере обратного канала:**
+- Нет пакета `system/bybit_mid/{symbol_id}` > `bybit_mid_feed_timeout_ms` (default 500 ms) → `entry_valid = 0` **по всем символам**, алерт `CRITICAL`, Safe-Mode фаза 1 (§5.2.1).
+- Восстановление канала → снятие halt entries после 3 валидных пакетов подряд.
 
-**На каждом forwarded Binance tick (per symbol на Executor):**
+**На каждом тике Binance / каждые 100 ms (per symbol):**
 
 | Поле | Формула | Источник |
 |------|---------|----------|
-| `binance_mid` | mid из forwarded tick | Zenoh `binance/tick/{id}` |
-| `bybit_mid_ref` | последний local Bybit mid | Executor Bybit WS |
-| `lag_bps` | `(binance_mid − bybit_mid_ref) / bybit_mid_ref × 10_000` | Executor |
-| `impulse_bps_100ms` | `(binance_mid_now − binance_mid_100ms_ago) / … × 10_000` | Executor |
-| `lag_residual_bps` | `impulse_bps_100ms − bybit_move_bps_since_impulse` | Executor |
+| `binance_mid` | mid из `@bookTicker` | Observer local WS |
+| `bybit_mid_ref` | последний `bybit_mid` с feed | Zenoh `system/bybit_mid/{symbol_id}` |
+| `lag_bps` | `(binance_mid − bybit_mid_ref) / bybit_mid_ref × 10_000` | Observer |
+| `impulse_bps_100ms` | `(binance_mid_now − binance_mid_100ms_ago) / binance_mid_100ms_ago × 10_000` | Observer |
+| `lag_residual_bps` | `impulse_bps_100ms − bybit_move_bps_since_impulse` | Observer |
 
-**Follow-through snapshot (offline + rolling):** при `|impulse_bps_100ms| ≥ impulse_min_bps` логировать forward returns Bybit на +200…+1000 ms.
+**Follow-through snapshot (offline + rolling 24 h):** при `|impulse_bps_100ms| ≥ impulse_min_bps` логировать forward returns Bybit на +200, +500, +1000 ms → Parquet / `.bin` event `FOLLOW_THROUGH`.
 
 **Runtime gate (§7):** `entry_valid = 0` если:
-- `lag_residual_bps` со **знаком** (long: residual ≥ `lag_min_bps`; short: residual ≤ −`lag_min_bps`),
-- `|lag_residual| × capture_est < D_min_net` (в **bps**),
-- local `bybit_mid` stale,
-- rolling `follow_through_rate_1h < follow_through_min` (override из `edge_profile.toml` после §9.0).
+- `lag_residual_bps < lag_min_bps` (lag схлопнулся — edge уже забрали),
+- `bybit_mid` stale (§3.5.1),
+- rolling `follow_through_rate_1h < follow_through_min` (§10.1; **override только из `edge_profile.toml` после §9.0**).
 
-> ADR: `docs/adr/003-singapore-entry.md` (supersedes ADR-001)
+> ADR: `docs/adr/001-lag-pipeline.md`
 
 ---
 
 ## 4. Модуль Executor (Сингапур) — Маршрутизация, исполнение, риск
 
 ### 4.1. Приём и валидация
-- Async Zenoh Subscriber: `binance/tick/**` + `system/heartbeat`.
-- На tick: local Entry §7 → `MarketStatePacket` (для log/replay); **не** ждёт `entry_valid` из Tokyo.
-- **Freshness Check** = age of **forwarded Binance tick**:
+- Async Zenoh Subscriber, неблокирующий `Stream`.
+- Мгновенная десериализация в `MarketStatePacket`.
+- **Freshness Check:**
   ```rust
-  let latency_ns = utc_now_ns() - binance_tick.ts_ns;
-  if latency_ns > 150_000_000 { drop(tick); }  // > 150 ms (P99-safe)
+  let latency_ns = utc_now_ns() - packet.ts_ns;
+  if latency_ns > 150_000_000 { drop(packet); }  // > 150 ms (P99-safe)
   ```
   `utc_now_ns()` — UTC wall-clock на Executor, синхронизированный через chrony.
 - **Dedup и gap:** см. §2.2.
-- **Entry gate:** локальный `entry_valid == 0` → только Position Manager (открытые позиции), **новый вход запрещён**.
-- Протухшие тики игнорируются, лог `INFO`.
+- **Entry gate:** `entry_valid == 0` → пакет используется только для Position Manager (открытые позиции), **новый вход запрещён**.
+- Протухшие пакеты игнорируются, лог `INFO`.
 
 ### 4.2. Risk Engine (hot path ≤ 10 мкс + warm cache)
 
@@ -600,10 +556,9 @@ Risk Engine разделён на два контура:
 | **Warm path** | ≤ 1 ms (данные ≤ 100 ms stale OK) | capital, DD, correlation, Bybit spread/depth, funding, basis | Фоновые задачи |
 
 **Warm path — фоновые задачи (не в hot path):**
-- Bybit public WS (`orderbook.1` + `publicTrade` + mid) → spread/depth/imbalance/`bybit_volume_delta_100ms` (**as-built**).
-- `GET /v5/market/tickers?category=linear` → funding (**TODO poller**; флаг `FUNDING_OK` в структуре есть, live poll — не подключён).
-- Basis Binance–Bybit warm (**TODO**).
-- Balance / margin / DD — каждые 500 ms или по событию fill (частично; paper может симулировать).
+- `@bookTicker` + `@aggTrade` Bybit WS → spread, depth, `bybit_mid`, **`bybit_volume_delta_100ms`** (каждый тик).
+- `GET /v5/market/tickers?category=linear` → funding (интервал `ticker_poll_interval_sec`, по умолчанию 60 с).
+- Balance / margin / DD — каждые 500 ms или по событию fill.
 
 **RiskFlags bitmap (atomic u64, обновляется warm path):**
 
@@ -621,18 +576,17 @@ Risk Engine разделён на два контура:
 | `PAIR_ENABLED` | Пара `enabled = true` в symbols.toml / панели (§8.5.3) |
 | `ENTRIES_SPOT_OK` | `halt_entries_spot = false` (§8.5.9) |
 | `ENTRIES_FUTURES_OK` | `halt_entries_futures = false` (§8.5.9) |
-| `FEE_EDGE_OK` | `D_exp ≥ D_min_net` из локальной оценки (§6.3) |
+| `FEE_EDGE_OK` | `D_exp ≥ D_min_net` из пакета (§6.3) |
 
 **Hot path pseudocode:**
 ```rust
-// Entry §7 уже выполнен на Executor; packet локальный
 if packet.entry_valid == 0 { return Skip; }
-if adverse_move_bps(ref, bybit_mid) > max_adverse_move_bps { return AdverseKill; }
 if !risk_flags.all_required() { log RISK_SKIP; return Skip; }
+// MICRO_OK + BASIS_OK — последняя проверка «edge ещё на Bybit» перед ордером
 route_and_open(packet.direction_bias);
 ```
 
-> **Двойной gate на деньги:** локальный `entry_valid` (lag open) + `max_adverse_move_bps` (Bybit ещё не догнал) + `MICRO_OK`/`BASIS_OK`/`FEE_EDGE_OK`. **`max_slippage_bps` (book VWAP)** — для sizing/research, **не** mid-kill.
+> **Двойной gate на деньги:** Observer `entry_valid` (lag open на Binance→Bybit) + Executor `MICRO_OK`/`BASIS_OK`/`FEE_EDGE_OK` (исполнение на Bybit всё ещё выгодно). Пропуск любого = `RISK_SKIP`.
 
 ### 4.3. Маршрутизация, Spot Short и коннекторы
 ```rust
@@ -663,18 +617,14 @@ pub enum InstrumentType { Spot, Futures }
 - **Short (Spot Margin):** borrow + sell base; close = buy + repay.
 
 ### 4.4. Логика исполнения
-
-**As-built (v2.7):** REST `Bybit V5` signed orders (`executor_core::bybit`), default **Market IOC** entry + reduce-only stop/exit. Limit-IOC fallback из конфига — **целевой** путь (флаг `use_limit_fallback`); hot path сейчас market-first.
-
-**Money-path fail-closed (`executor_core::money_path`):**
-1. Live entry → локальная `PositionState` **только** при API OK **и** наличии `orderId`.
-2. Live exit / partial → снятие локальной позиции / ledger **только** при API OK.
-3. Max **1** открытая позиция на `symbol_id`.
-4. Live notional sizing: `deposit × risk_per_trade_pct × leverage` (`entry_risk_frac`).
-
-**Целевой (ещё не полный):**
-- Private WS `execution_report` → fill price truth (сейчас ledger ≈ mid).
-- Limit IOC ±0.01% → 50 ms → Market fallback при `use_limit_fallback = true`.
+- Протокол: `Bybit V5 Private WebSocket`.
+- **Pre-allocated order templates:** JSON-буфер и каноническая строка для HMAC pre-allocated at startup. **В момент ордера** (≤ 50 μs): вставка `timestamp_ms`, `symbol`, `side`, `qty` → пересчёт SHA256-HMAC. Полная pre-sign **невозможна** из-за timestamp.
+- **Limit IOC + Fallback (по умолчанию):**
+  1. `Limit IOC` по цене `mid ± 0.01%`.
+  2. Таймер 50 мс. Не исполнился → `Market`.
+  3. Проскальзывание `> 0.05%` → слот −20%, алерт.
+- Конфиг-флаг `use_limit_fallback: false` → чистый Market.
+- Подтверждение: `execution_report` по WS. Статус позиции обновляется в `PositionState`.
 
 ### 4.5. Fail-safe Spot (защита при сбое процесса)
 - **При открытии позиции (Spot Long):** если `spot_exchange_stop = true` (config), выставляется **reduce-only Stop-Limit** на бирже на уровне `initial_sl × (1 − sl_exchange_buffer_pct)` (Long) с буфером 0.1%.
@@ -811,27 +761,9 @@ K_tp_trail = clamp(base_tp_trail_atr × (1 + 0.1 × |Z|), 0.8, 1.5)
 
 ### 5.4. Адаптивное поднятие SL/TP по метрикам Binance
 
-**Смысл (целевой дизайн):** пока позиция открыта, Position Manager пересчитывает SL/TP по состоянию импульса Binance (Z, Vel, ATR, regime) **и** Bybit PnL — не только фиксированные пороги.
+**Смысл:** пока позиция открыта, Observer продолжает слать `MarketStatePacket` с актуальными Z, Velocity, ATR, regime с Binance Futures. Position Manager на Executor **на каждом пакете** пересчитывает SL/TP — не ждёт фиксированных порогов PnL, а реагирует на **положение дел на Binance**.
 
-#### 5.4.1. As-built (Фаза 1, код v2.6)
-
-Реализовано на Executor (`PositionManager`) по **Bybit mid / PnL**:
-
-| Механизм | Статус |
-|----------|--------|
-| Trail SL/TP после `trail_arm_pct` | ✅ |
-| Fee-breakeven ratchet (long **и** short) | ✅ |
-| Partial close @ `initial_target_pct` | ✅ |
-| Exchange stop sync + `reduce_only` exits | ✅ |
-| Monotonic SL/TP (§5.0 / §5.5) | ✅ |
-| Full Binance Z/Vel/regime adaptive table ниже | ❌ TODO |
-| Continuous `MarketStatePacket` с Tokyo для in-position adapt | ❌ N/A under ADR-003 (Tokyo не шлёт MSP) |
-
-> Adaptive SL/TP **не создаёт** edge; только монетизирует уже открытый. Без `net_edge > 0` на входе — бесполезен для прибыли.
-
-#### 5.4.2. Целевая таблица (TODO — после positive edge)
-
-| Сигнал Binance (из локальных SymbolMetrics на Executor) | Действие по SL | Действие по TP |
+| Сигнал Binance (из пакета) | Действие по SL | Действие по TP |
 |----------------------------|----------------|----------------|
 | `\|Z\|` растёт, `\|Vel\|` в сторону позиции, regime=Trend | Поднять SL (Long) / опустить SL (Short) на `ΔATR × k_sl_tight` (k=0.3); не ниже fee-BE (§6.3) | Расширить TP trail: `K_tp × 1.2`; фаза → Extended при `\|Z\| > 2.0` |
 | `\|Z\|` падает, `\|Vel\|` затухает (exhaustion) | Удержать текущий SL (не ослаблять) | Сузить TP trail; при `\|Vel\| < 0.00005` — досрочный выход (§5.2) |
@@ -842,10 +774,10 @@ K_tp_trail = clamp(base_tp_trail_atr × (1 + 0.1 × |Z|), 0.8, 1.5)
 **Правила монотонности (защита депозита):**
 - **Long:** SL только ↑; TP trail только ↑ (не отдаём заработанное).
 - **Short:** SL только ↓; TP trail только ↓.
-- Поднятие SL **никогда** не опускает защиту ниже **fee-breakeven** (§6.3).
-- Если Binance импульс сильный (`\|Z\| ≥ 2.5` ∧ `\|Vel\| > velocity_min`) — `sl_binance` → fee-BE **до** порога PnL 0.30%; итог через §5.5.
+- Поднятие SL **никогда** не опускает защиту ниже **fee-breakeven** (цена входа + round-trip комиссии, §6.3).
+- Если Binance импульс сильный (`\|Z\| ≥ 2.5` ∧ `\|Vel\| > velocity_min`) — `sl_binance` → fee-BE **до** порога PnL 0.30% (опережающая защита); итог через §5.5.
 
-**Источник ATR/Z/Vel/regime (целевой):** локальные `SymbolMetrics` на Executor из forwarded Binance ticks. **Trigger price:** Bybit mid (§5.2). **Итоговый SL:** §5.5.
+**Источник ATR/Z/Vel/regime:** пакет Observer (Binance). **Trigger price:** Bybit mid (§5.2). **Итоговый SL:** §5.5.
 
 ---
 
@@ -1021,21 +953,6 @@ TP_min_short = Entry × (1 − D_min_net)
 ### 8.5. Панель управления (Control Panel)
 
 Отдельный сервис **`control-panel`** на Executor (Сингапур) или выделенном admin-хосте в той же VPC. Назначение — операторское управление капиталом, парами и мониторинг профита **без правки конфигов вручную на сервере**.
-
-#### 8.5.0. As-built (v2.8) — что работает сейчас
-
-| Функция | Статус | Как |
-|---------|--------|-----|
-| Web UI | ✅ | `http://127.0.0.1:8080/` |
-| PnL / equity / open-closed | ✅ | `GET /api/v1/dashboard` ← `logs/runtime_status.json` |
-| Pause / Resume / Flatten | ✅ | Zenoh `system/command` |
-| Лимит депозита USDT и % | ✅ | `CapitalPolicy.max_tradeable_*` → `logs/capital_policy.json` |
-| Max notional / risk % на сделку | ✅ | тот же policy |
-| **Вывод профита без реинвеста** | ✅ | `POST /api/v1/capital/bank` + `compound_pnl=false` (default) |
-| JWT / HTTPS / WS push | ❌ TODO | bind private IP; tunnel |
-| Hot-edit pair alloc в UI | ❌ TODO | пока `symbols.toml` |
-
-Ops: [`deploy/PANEL.md`](deploy/PANEL.md). Код: `executor_core::capital`, `crates/panel`.
 
 #### 8.5.1. Общие требования
 
@@ -1485,34 +1402,23 @@ Analyst при генерации `manual_entry` / forecast **обязан** п�
 
 1. **Follow-through rate** по `(symbol, hour_utc, vol_bucket)`.
 2. **Conditional return** Bybit после `impulse ≥ impulse_min_bps`.
-3. **Net edge bps** = conditional return − fee_round_trip − **L2 VWAP slippage** (не fixed 5 bps для production).
+3. **Net edge bps** = conditional return − fee_round_trip − slippage_assumption (0.05%).
 4. **Top-quartile windows** — часы/vol, где `net_edge_bps > 0`.
-5. **Injected latency** = age of **forwarded Binance tick** at Singapore decide (ADR-003).
 
 **Выход §9.0 → `config/edge_profile.toml`:**
 
 ```toml
-[meta]
-status = "pass"                 # только live L2, period_days >= 14, data_source != synthetic
-research_method = "l2_vwap"
-data_source = "binance_vision"  # synthetic → refuse paper/live
-research_period_days = 14
-
 [edge.BTCUSDT]
-follow_through_min = 0.42
+follow_through_min = 0.42          # из данных, не guess
 lag_min_bps = 3.0
-trade_hours_utc = [13, 14, 15, 16, 17, 18, 19, 20]
+trade_hours_utc = [13, 14, 15, 16, 17, 18, 19, 20]  # пример
 vol_regime_min_atr_pct = 0.0025
-max_slippage_bps = 5.0          # book VWAP (sizing)
-max_adverse_move_bps = 12.0     # kill if Bybit already caught up (≠ book slip)
 ```
 
-**Go §9.0:** хотя бы **1 пара** с `net_edge_bps > 0` в ≥3 часовых окнах **и** `data_source` live/`binance_vision` **и** `research_period_days ≥ 14`; иначе **stop**.
+**Go §9.0:** хотя бы **1 пара** с `net_edge_bps > 0` в ≥3 часовых окнах; иначе **stop** — стратегия не monetizable на текущем депозите/infra.
 
 **Стартовая валидация конфига (обязательна):**
 - `edge_profile.meta.status != "pass"` → **refuse start** в режимах paper/live (dev mono-node — warn only).
-- `data_source == "synthetic"` → **refuse start** paper/live.
-- `research_period_days < 14` → **refuse start** paper/live.
 - `spot_enabled = false` ∧ enabled spot-символ в `symbols.toml` → **refuse start**.
 - `packet_version` в config ≠ `PACKET_VERSION` в binary → **refuse start**.
 - `initial_target_pct < D_min_net_futures` → **refuse start** (TP меньше комиссий = гарантированный минус).
@@ -1520,76 +1426,38 @@ max_adverse_move_bps = 12.0     # kill if Bybit already caught up (≠ book slip
 ### 9.1. Тестирование
 | Этап | Инструменты | Критерии приемки |
 |------|-------------|------------------|
-| **Edge Research** | §9.0 + Phase 0.5 L2 | `net_edge_bps > 0`; real L2 ≥14d; `data_source != synthetic` |
+| **Edge Research** | §9.0 collector + report | `net_edge_bps > 0`; `edge_profile.toml` generated |
 | **Resource budget** | §2.7 limits on t3.micro | RAM/CPU within soft limits 24 h paper |
-| **Lag gates** | Unit §7 + ADR-003 | No entry when `lag_residual < lag_min_bps`; convergence exit fires |
-| Unit/Integration | `cargo test` | Критический путь зелёный; 0 критических багов |
-| Entry host | ADR-003 | Entry runs on **Executor**; Observer does not set `entry_valid` |
-| SL/TP state machine | unit `position.rs` | Monotonic SL/TP; fee-BE long/short; partial |
-| **Mono smoke** | `scripts/smoke_mono_node.ps1` | Observer+executor локально без падения |
-| **Offline harness** | `scripts/testnet_order_harness.ps1` | Smoke Bybit testnet API (keys локально, не в git) |
-| **Testnet analytics** | `BOT_TESTNET_ANALYTICS=1` + `deploy/TESTNET_ANALYTICS.md` | Отчёт `research/edge_report/testnet_session_report.md`; оба бинаря |
+| **Lag gates** | Unit §7 + §3.5 | No entry when `lag_residual < lag_min_bps`; convergence exit fires |
+| Unit/Integration | `cargo test`, `mockall`, `proptest` | Coverage ≥ 80% критического пути; 0 критических багов |
+| Entry/Risk split | Mock packets | Executor **не** вызывает Z/D_exp; reject при `entry_valid=0` |
+| SL/TP state machine | proptest порогов | Monotonic SL/TP; порядок 0.15→0.30→TP-0 |
 | Network Simulation | `tc netem` (delay 50ms jitter 5ms loss 0.1%) | Safe-Mode; gap storm pause; ордера не дублируются |
-| Replay Engine | Симулятор на **реальных** `.bin` логах | TCA: slippage, fees, latency; PF ≥ 1.2 для live; fixture ≠ live gate |
-| **Latency replay** | Inject tick age 150 ms | **Follow-through rate ≥ 40%** |
-| Paper Trading | paper ledger (`allow_unverified_paper` только lab) | ≥ 100 сделок Futures; DD < 10%; net after fees |
-| Live Staged | **1% депозита**, ×3, **только после edge pass** | 7 дней без критических ошибок |
-| **Control Panel** | API + UI e2e | halt; cancel-all; net PnL после fees |
-| **Fee edge** | Unit + replay | Сделки с `D_exp < D_min_net` не открываются |
-| **Binance-adaptive SL/TP** | Replay + unit | As-built trail/fee-BE; full §5.4.2 — после TODO |
+| Replay Engine | Симулятор на `.bin` логах | TCA: slippage, fees, latency; PF ≥ 1.2 для live |
+| **Latency replay** | Inject `injected_latency_ms = 150` | **Follow-through rate ≥ 40%**: доля сигналов, где Bybit движется в сторону `direction_bias` в окне 300 ms после delayed entry |
+| Paper Trading | Bybit Testnet + Binance Futures Testnet | ≥ 100 сделок **Futures**; Spot — только после futures PF ≥ 1.3; DD < 1% |
+| Live Staged | 1% депозита | 7 дней без критических ошибок |
+| **Control Panel** | API + UI e2e | Spot/Futures alloc раздельно; halt entries spot ≠ futures; cancel-all orders; net PnL после fees |
+| **Fee edge** | Unit + replay | Сделки с `D_exp < D_min_net` не открываются; BE включает fees |
+| **Binance-adaptive SL/TP** | Replay + proptest | `effective_SL` монотонен; ≥ fee-BE; §5.5 |
 | **Safe-Mode phased** | Integration | Фаза 1 не закрывает; фаза 3 закрывает все |
 | **Cancel + restore stop** | Integration | После cancel-all exchange stop восстановлен ≤ 2 s |
-| **MVP mono-node** | §2.6 deploy | **2–3** futures pairs; spot disabled; debug only |
-| **Analyst Service** | §8.6.4 | Proposal+Apply e2e; **Фаза 2** |
-| **Order Book DB** | §8.7 | **Фаза 2** |
-| **Go/No-Go** | §8.6.8 checklist | Пункты 0–4, 6–7 pass перед live mainnet |
-| **Mainnet gate** | `trading_mode.rs` / env | `status=pass` ∧ `BOT_ALLOW_MAINNET=1`; иначе refuse |
-| **Money-path** | `money_path.rs` unit | entry needs orderId; exit fail-closed; 1 pos/symbol |
-| **Prod preflight** | `scripts/check_production_ready.ps1` | exit≠0 if `status!=pass` |
-
-**Лестница (деньги):** code green → testnet analytics (ключи пользователя) → tune до `net>0` → `check_production_ready` → mainnet 1% → spot фаза 2.
+| **MVP mono-node** | §2.6 deploy | **2–3** futures pairs; spot disabled; PF paper ≥ 1.2 |
+| **Analyst Service** | §8.6.4 | Proposal+Apply e2e; manual_entry через Risk; TTL expire |
+| **Order Book DB** | §8.7 | ≥100k snapshots/пара; features 1 min |
+| **Go/No-Go** | §8.6.8 checklist | Пункты 0–4, 6–7 pass перед live |
 
 ### 9.2. CI/CD и развертывание
 
-**Фаза 1 (as-built deploy):**
-- Бинари: `observer`, `executor`, `control-panel`, `telegram-alerts`, `bybit-smoke`
-- Pack: `deploy/package_release.sh` → `dist/tokyo.tgz` / `dist/singapore.tgz`
-- Push: `deploy/push_node.sh <role> user@host [--install]`
-- Units: `observer.service` (Tokyo), `executor.service` (+ optional panel/telegram) (Singapore)
-- Env: `/etc/bot/secrets.env` (`EnvironmentFile=-/etc/bot/secrets.env`); `BOT_ZENOH_CONFIG=/etc/bot/zenoh.json5`
-- Docs: `deploy/QUICK_DEPLOY.md`, `DUAL_NODE.md`, `PRODUCT.md`, `AUDIT_STATUS.md`, **`PRODUCTION.md`**
+**Фаза 1 (минимальный deploy):**
+- `bot-mvp.service` (или `observer` + `executor`), `telegram-alerts.service`, `control-panel.service`
 
 **Фаза 2 (добавляется к Фазе 1):**
 - `book-collector.service`, `analyst.service`, PostgreSQL/TimescaleDB
 
-- Pipeline (целевой): GitHub Actions → fmt → clippy → test → `package_release` → artifact → SSH/`push_node`.
-- Конфиг: `/etc/bot/config.toml`, `symbols.toml`, `edge_profile.toml`, `zenoh.json5`.
-- Rollback: предыдущий tarball + `systemctl restart`; Runbook.
-
-### 9.3. Production / реальные деньги (обязательный fail-closed)
-
-> **Не путать «код готов» с «edge готов».** Без `edge_profile.meta.status = "pass"` mainnet **запрещён** даже при зелёных unit-тестах.
-
-| Шаг | Критерий | Артефакт |
-|-----|----------|----------|
-| A | `cargo test --workspace` green + money_path tests | CI / local |
-| B | Mono smoke / testnet harness | `scripts/smoke_mono_node.ps1` |
-| C | ≥1 Bybit **TESTNET** analytics session | `deploy/TESTNET_ANALYTICS.md` |
-| D | Research: `status=pass`, `net_edge_bps>0`, ≥14d real L2 | `config/edge_profile.toml` |
-| E | Preflight | `.\scripts\check_production_ready.ps1` (exit 0) |
-| F | Env mainnet | `BYBIT_TESTNET=0`, `BOT_ALLOW_MAINNET=1`, analytics **off** |
-| G | Dual-node VPC private Zenoh | `deploy/QUICK_DEPLOY.md` |
-| H | Staged size | `risk_per_trade_pct ≤ 0.01`; 7 дней без критических ошибок |
-
-**Money-path invariants (код `executor_core::money_path`):**
-1. Локальная позиция после live entry **только** если API OK **и** есть `orderId`.
-2. Ledger/local close после live exit/partial **только** если API OK.
-3. Не более **одной** открытой позиции на `symbol_id`.
-4. Live sizing = `risk_per_trade_pct` (не полный alloc).
-
-**Остаётся optimistic (документированный риск до scale):** цена в ledger = mid decide-time (не avg fill); funding/basis poller TODO; §5.4.2 TODO.
-
-Канон ops: [`deploy/PRODUCTION.md`](deploy/PRODUCTION.md).
+- Pipeline: GitHub Actions → fmt → clippy → test → release → S3 → SSH deploy.
+- Конфиг: `/etc/bot/config.toml`, `symbols.toml`, `analyst.toml` (Фаза 2).
+- Rollback: документирован в Runbook.
 
 ---
 
@@ -2357,68 +2225,3 @@ shared_observer_fanout = true
 | 6 | 2× t3.micro Singapore OOM risk | Paper/live: **t3.small** Singapore (§2.4) |
 | 7 | Конфиг только в markdown | Канонические файлы `config/` + ADR `docs/adr/` |
 | 8 | Entry без двойного gate на Bybit | §4.2: Observer `entry_valid` + Executor `MICRO_OK`/basis/fees |
-
----
-
-## 24. Изменения v2.3 → v2.4 / v2.5 (ADR-003 + runtime)
-
-| # | Добавлено / изменено | Описание |
-|---|----------------------|----------|
-| 1 | ADR-003 | Tokyo thin forwarder; Entry на Singapore; supersedes ADR-001 |
-| 2 | Sign-aware residual | Long/short без `.max(0)`; capture на abs |
-| 3 | Fee gate | В **bps**; Forecast EV `e_net_bps > 0` |
-| 4 | Impulse | Wall-clock `price_ago_ms(100)` |
-| 5 | MICRO | Bybit `orderbook.1` + `publicTrade` |
-| 6 | Dynamic SL/TP | Trail / fee-BE / partial + exchange stop sync |
-| 7 | Testnet analytics | `BOT_TESTNET_ANALYTICS` на **обоих** бинарях; WS testnet |
-| 8 | Instruments | qtyStep / minQty / `set_leverage` |
-| 9 | Edge | Real L2 ≥14d → **fail** (~−9 bps); mainnet fail-closed |
-| 10 | Spot | Phase 2 / off |
-
----
-
-## 25. Изменения v2.5 → v2.6 (as-built sync + deploy)
-
-| # | Проблема / пробел v2.5 docs | Исправление v2.6 |
-|---|----------------------------|------------------|
-| 1 | Шапка ТЗ = 2.4 при changelog 2.5 | Версия **2.6** + as-built блок |
-| 2 | §2.2 «UDP 7447» vs код TCP | **TCP** private IP; UDP не дефолт |
-| 3 | §2.1 Executor = t3.micro | **t3.small** (§2.4) |
-| 4 | Нет one-shot deploy | §2.4.1 `package_release` / `push_node` / QUICK_DEPLOY |
-| 5 | §3 «Entry Engine на Observer» | Thin forwarder; math/entry crate на **Executor** |
-| 6 | §5.4 как будто fully shipped | §5.4.1 as-built vs §5.4.2 TODO |
-| 7 | Funding poller как done | Warm: MICRO ✅; funding/basis **TODO** |
-| 8 | §9.1 без testnet ladder | Testnet analytics + mainnet gate + smoke scripts |
-| 9 | §9.2 `bot-mvp.service` / S3 only | Tarball dual-node path as-built |
-| 10 | Диаграмма Zenoh UDP | TCP + Forecast + MICRO + testnet gate |
-
----
-
-## 26. Изменения v2.6 → v2.7 (money-path + production)
-
-| # | Добавлено | Описание |
-|---|-----------|----------|
-| 1 | `executor_core::money_path` | Fail-closed entry/exit/1-pos/symbol + unit tests |
-| 2 | Live entry | Требует API OK **и** `orderId` иначе нет локальной позиции |
-| 3 | Live exit/partial | Ledger close только после API OK |
-| 4 | §9.3 | Production ladder для **реальных денег** |
-| 5 | `scripts/check_production_ready.ps1` | Refuse если `status!=pass` |
-| 6 | `deploy/PRODUCTION.md` | Ops checklist staged mainnet |
-| 7 | Honest block | Mainnet **запрещён** при текущем edge fail (~−9 bps) |
-| 8 | Risk completeness | Нет mid/NaN/bias0/MICRO fight → Skip |
-| 9 | Invalidation | Только residual+impulse flip; не false-exit на bias=0 |
-| 10 | Warm book | depth≤0 → BOOK/MICRO cleared до первого MICRO |
-
----
-
-## 27. Изменения v2.7 → v2.8 (earn / conviction)
-
-| # | Добавлено | Описание |
-|---|-----------|----------|
-| 1 | §1.9 Earn thesis | Binance observe → Bybit confident margin entry |
-| 2 | `observer_core::conviction` | Latency haircut, min net edge, FT, score |
-| 3 | Margin scale | `conviction_margin_frac` / `conviction_leverage` — max when sure |
-| 4 | Executor | Conviction gate before Open; size by score |
-| 5 | `deploy/EARN_THESIS.md` | Product plan aligned with earn intent |
-| 6 | Honesty | Edge fail still blocks mainnet; conviction ≠ invent alpha |
-| 7 | §8.5.0 Panel | UI + capital caps + bank profit (no reinvest) |

@@ -7,14 +7,8 @@ Type=simple
 User=bot
 WorkingDirectory=/opt/bot
 Environment=BOT_CONFIG=/etc/bot/config.toml
-Environment=BOT_SYMBOLS=/etc/bot/symbols.toml
-Environment=BOT_ZENOH_CONFIG=/etc/bot/zenoh.json5
-Environment=BOT_STATUS_PATH=/var/log/bot/runtime_status.json
-Environment=BOT_CAPITAL_PATH=/var/log/bot/capital_policy.json
-EnvironmentFile=-/etc/bot/secrets.env
 ExecStart=/opt/bot/bin/control-panel
 Restart=always
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

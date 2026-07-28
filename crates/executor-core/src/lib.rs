@@ -1,4 +1,5 @@
 pub mod bybit;
+pub mod market;
 pub mod paper_ledger;
 pub mod position;
 pub mod receiver;

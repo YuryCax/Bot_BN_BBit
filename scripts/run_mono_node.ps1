@@ -1,5 +1,5 @@
-# Mono-node ADR-003: in-process dual path on one host (dev wiring only).
-# For real TESTNET work (orders + panel): .\scripts\run_work_stack.ps1
+# Mono-node ADR-003: in-process dual path on one host (dev only).
+# Starts Executor (entry+risk+local Bybit) then Observer (thin Binance forwarder).
 # Requires Zenoh peer connectivity on localhost. Not valid for live go/no-go (§2.6).
 
 param(

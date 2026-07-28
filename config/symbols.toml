@@ -1,6 +1,5 @@
 # MVP Phase 1 — futures-only (spot_enabled = false in config.toml)
-# Target leverage ×10 when conviction score ≥ 0.75 (see money_path::conviction_leverage).
-# SOL/AVAX enabled only after real L2 pass (analyze_lead_lag.py) — edge fail blocks mainnet.
+# Sum of futures_alloc_pct for enabled symbols must be <= 1.0
 
 [[symbol]]
 id = 1
@@ -9,7 +8,7 @@ bybit = "BTCUSDT"
 instrument = "futures"
 leverage = 10
 enabled = true
-futures_alloc_pct = 0.25
+futures_alloc_pct = 0.20
 
 [[symbol]]
 id = 2
@@ -18,7 +17,7 @@ bybit = "ETHUSDT"
 instrument = "futures"
 leverage = 10
 enabled = true
-futures_alloc_pct = 0.25
+futures_alloc_pct = 0.20
 
 [[symbol]]
 id = 3
@@ -27,13 +26,14 @@ bybit = "SOLUSDT"
 instrument = "futures"
 leverage = 10
 enabled = false
-futures_alloc_pct = 0.15
+futures_alloc_pct = 0.10
 
-[[symbol]]
-id = 4
-binance = "AVAXUSDT"
-bybit = "AVAXUSDT"
-instrument = "futures"
-leverage = 10
-enabled = false
-futures_alloc_pct = 0.15
+# --- Spot (Phase 2, after min_futures_pf_for_spot) ---
+# [[symbol]]
+# id = 4
+# binance = "ETHUSDT"
+# bybit = "ETHUSDT"
+# instrument = "spot"
+# spot_margin_enabled = false
+# enabled = false
+# spot_alloc_pct = 0.15

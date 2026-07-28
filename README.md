@@ -1,45 +1,60 @@
 # Bot_BN_BBit
 
-Low-latency lead-lag: **Binance Futures (Tokyo forward) → Bybit Perp (Singapore entry)** — ADR-003.
+Low-latency cross-exchange lead-lag trading: **Binance Futures (signal) → Bybit Perpetual (execution)**.
 
-## Architecture (v2.4)
+## Project structure
 
-| Node | Role |
-|------|------|
-| **Observer** (Tokyo) | Thin forwarder: `BinanceTick` + heartbeat — **no** `entry_valid` |
-| **Executor** (Singapore) | Local Bybit mid + Entry §7 + Risk (`max_adverse_move_bps` ≠ book slip) + orders |
+```
+config/           # config.toml, symbols.toml, edge_profile.toml, analyst.toml
+crates/
+  shared/         # MarketStatePacket, config, validation, zenoh IPC
+  observer-core/  # Binance WS, Entry Engine, lag §3.5
+  executor-core/  # Risk, Position Manager, Bybit signing
+  observer-bin/   # observer service
+  executor-bin/   # executor service
+  panel/          # Control Panel REST API §8.5
+  replay/         # Replay engine §9.1
+  telegram-alerts/
+research/         # Phase 0 Edge Research
+analyst/          # Phase 2 offline advisor
+book-collector/   # Phase 2 TimescaleDB
+deploy/           # systemd + docker-compose
+```
 
-## Build
+## Build (requires Rust 1.78+)
 
 ```bash
-cargo build --release -p observer-bin -p executor-bin
-cargo test -p shared -p executor-core -p observer-core -p replay
+cargo build --release
+cargo test --all
 ```
 
-## Gates before paper/live
+Binaries: `target/release/observer`, `executor`, `control-panel`, `replay`, `telegram-alerts`
 
-1. `.\scripts\run_quant_hardening.ps1 -LiveDownload` → `edge_profile` `status=pass`, `data_source!=synthetic`, `research_period_days≥14`
-2. Dual-node paper + `logs/paper_ledger.jsonl`; replay **real** `logs/packets.bin` (no auto-fixture)
-3. Staged live checklist: [`deploy/STAGED_LIVE.md`](deploy/STAGED_LIVE.md) — 1% risk, ×3, one pair
-4. SOL/AVAX: [`deploy/ALTS_ENABLE.md`](deploy/ALTS_ENABLE.md) — stay off until real L2 pass
+## Phase 0 — Edge Research
 
-## Dev mono-node
-
-```powershell
-.\scripts\smoke_mono_node.ps1    # timed wiring smoke (dev only)
-.\scripts\run_mono_node.ps1      # interactive (Ctrl+C)
+```bash
+pip install -r research/collector/requirements.txt
+python research/collector/collector.py --duration-sec 3600
+python research/edge_report/analyze.py
 ```
 
-Requires `mode=dev` until real edge pass. Not valid for live go/no-go.
+## Run (mono-node dev)
 
-**Do not trade / do not rent dual-node for money while fail:** [`deploy/NO_LIVE_UNTIL_PASS.md`](deploy/NO_LIVE_UNTIL_PASS.md)
+```bash
+export BOT_CONFIG=config/config.toml
+export BOT_SYMBOLS=config/symbols.toml
+cargo run -p observer-bin
+cargo run -p executor-bin
+cargo run -p panel
+```
 
-## Product (Phase 1)
+## Deploy
 
-See [`deploy/PRODUCT.md`](deploy/PRODUCT.md). Dual-node: [`deploy/DUAL_NODE.md`](deploy/DUAL_NODE.md).
+- Dual-node: `deploy/systemd/` on t3.micro Tokyo + t3.small Singapore
+- TimescaleDB: `docker compose -f deploy/docker-compose.yml up -d`
 
-- **Paper never sends live orders** (`mode!=live`).
-- Kill switch: Panel `/api/v1/trading/halt` + Telegram `/pause` → Zenoh → Executor.
-- Dynamic SL/TP (trail / fee-BE / partial) + MICRO_OK from Bybit book/trades; long **and** short residual.
-- API tests: testnet only by default — [`deploy/TESTNET_HARNESS.md`](deploy/TESTNET_HARNESS.md).
-- Edge still `fail` on real hist (~−9 bps net) — do not set mainnet `mode=live`.
+## Gates
+
+- **Live:** `config/edge_profile.toml` → `meta.status = "pass"`
+- **Paper:** replay PF ≥ 1.2, follow-through ≥ 40%
+- **Phase 3:** `analyst/phase3/shadow.py` → pf_shadow > pf_actual

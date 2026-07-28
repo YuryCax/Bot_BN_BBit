@@ -1,24 +1,24 @@
 # ADR 002: Deploy Topology (Tokyo micro + Singapore small)
 
-**Status:** Accepted (v2.4)  
+**Status:** Accepted (v2.3)  
 **Date:** 2026-07-08  
-**Updated:** 2026-07-27 (ADR-003: Observer is thin forwarder)
+**Context:** Start budget ~$300 deposit; need low latency without OOM jitter on execution node.
 
 ## Decision
 
 | Node | Region | Instance | Services |
 |------|--------|----------|----------|
-| Observer | ap-northeast-1 (Tokyo) | **t3.micro** | observer forwarder only (Binance WS → Zenoh ticks) |
-| Executor | ap-southeast-1 (Singapore) | **t3.small** | executor (entry+risk+orders), control-panel, telegram-alerts |
+| Observer | ap-northeast-1 (Tokyo) | **t3.micro** | observer only |
+| Executor | ap-southeast-1 (Singapore) | **t3.small** | executor, control-panel, telegram-alerts |
 
 Paper and live **must not** run executor+panel+telegram on t3.micro (1 GiB).
 
 ## Rationale
 
-- Tokyo proximity to Binance Futures WS reduces **signal transport** latency (source of alpha).
-- Singapore proximity to Bybit: **entry decision + execution** co-located with local book (ADR-003).
-- Observer is lighter than v2.3 (no Entry Engine, no reverse-mid consumer) — t3.micro remains correct.
-- OOM on Executor → missed fills → direct PnL loss.
+- Tokyo proximity to Binance Futures WS reduces signal latency (source of alpha).
+- Singapore proximity to Bybit reduces execution slippage.
+- OOM or CPU credit exhaustion on Executor → missed fills, stale risk flags → direct PnL loss.
+- Observer is lighter (no Bybit private WS, no panel). Under **ADR-003** it is a **thin Binance→Zenoh forwarder** only (no Entry Engine); t3.micro remains sufficient.
 
 ## Mono-node MVP
 

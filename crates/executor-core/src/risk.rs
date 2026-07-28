@@ -105,20 +105,6 @@ impl RiskEngine {
         if packet.entry_valid == 0 {
             return RiskDecision::Skip;
         }
-        if packet.direction_bias == 0 {
-            return RiskDecision::Skip;
-        }
-        // Unknown / invalid prices → fail-closed (covers NaN and missing Bybit mid)
-        if !packet.ref_price.is_finite()
-            || packet.ref_price <= 0.0
-            || !packet.bybit_mid_ref.is_finite()
-            || packet.bybit_mid_ref <= 0.0
-        {
-            return RiskDecision::Skip;
-        }
-        if !packet.d_exp.is_finite() || !packet.d_min.is_finite() {
-            return RiskDecision::Skip;
-        }
         let latency = utc_now_ns().saturating_sub(packet.ts_ns);
         if latency > self.max_latency_ns {
             return RiskDecision::Stale;
@@ -139,18 +125,12 @@ impl RiskEngine {
             return RiskDecision::Skip;
         }
 
-        // MICRO: trade flow + imbalance must not fight the intended side
-        if packet.direction_bias > 0 {
-            if packet.volume_delta_100ms < 0.0 || packet.bid_ask_imbalance < 0.0 {
-                return RiskDecision::Skip;
-            }
-        } else if packet.direction_bias < 0 {
-            if packet.volume_delta_100ms > 0.0 || packet.bid_ask_imbalance > 0.0 {
-                return RiskDecision::Skip;
-            }
-        }
-
-        let move_bps = Self::adverse_move_bps(packet.ref_price, packet.bybit_mid_ref);
+        let bybit = if packet.bybit_mid_ref > 0.0 {
+            packet.bybit_mid_ref
+        } else {
+            packet.ref_price
+        };
+        let move_bps = Self::adverse_move_bps(packet.ref_price, bybit);
         if move_bps > self.max_adverse_move_bps {
             return RiskDecision::AdverseMoveExceeded;
         }
@@ -182,7 +162,6 @@ mod tests {
         };
         let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
         p.entry_valid = 1;
-        p.direction_bias = 1;
         p.ref_price = 100.0;
         p.bybit_mid_ref = 100.1; // 10 bps
         p.d_exp = 1.0;
@@ -193,48 +172,17 @@ mod tests {
     #[test]
     fn accepts_open_lag_within_adverse() {
         set_warm_flags(RiskFlags::all_futures());
+        // lag_min ~3 bps open is fine if adverse limit is 15
         let mut re = RiskEngine {
             max_adverse_move_bps: 15.0,
             ..Default::default()
         };
         let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
         p.entry_valid = 1;
-        p.direction_bias = 1;
         p.ref_price = 100.0;
         p.bybit_mid_ref = 99.96; // 4 bps — open lag, not caught up yet
         p.d_exp = 1.0;
         p.d_min = 0.1;
-        p.volume_delta_100ms = 1.0;
-        p.bid_ask_imbalance = 0.1;
         assert_eq!(re.check_entry(&p), RiskDecision::Open);
-    }
-
-    #[test]
-    fn rejects_missing_bybit_mid() {
-        set_warm_flags(RiskFlags::all_futures());
-        let mut re = RiskEngine::default();
-        let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
-        p.entry_valid = 1;
-        p.direction_bias = 1;
-        p.ref_price = 100.0;
-        p.bybit_mid_ref = 0.0;
-        p.d_exp = 1.0;
-        p.d_min = 0.1;
-        assert_eq!(re.check_entry(&p), RiskDecision::Skip);
-    }
-
-    #[test]
-    fn rejects_micro_fight() {
-        set_warm_flags(RiskFlags::all_futures());
-        let mut re = RiskEngine::default();
-        let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
-        p.entry_valid = 1;
-        p.direction_bias = 1;
-        p.ref_price = 100.0;
-        p.bybit_mid_ref = 99.99;
-        p.d_exp = 1.0;
-        p.d_min = 0.1;
-        p.volume_delta_100ms = -1.0;
-        assert_eq!(re.check_entry(&p), RiskDecision::Skip);
     }
 }

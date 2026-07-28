@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 const WINDOW: usize = 1000;
 
 #[derive(Debug, Clone)]

@@ -16,45 +16,6 @@ pub struct AppConfig {
     pub signals: SignalsConfig,
     pub network: NetworkConfig,
     pub control_panel: ControlPanelConfig,
-    /// Funding / basis warm gate (optional; defaults keep previous fail-open funding until polled).
-    #[serde(default)]
-    pub funding_basis: FundingBasisConfig,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct FundingBasisConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_max_funding")]
-    pub max_funding_rate: f64,
-    #[serde(default = "default_basis_threshold")]
-    pub basis_threshold_pct: f64,
-    #[serde(default = "default_ticker_poll_sec")]
-    pub ticker_poll_interval_sec: u64,
-}
-
-impl Default for FundingBasisConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_funding_rate: 0.0001,
-            basis_threshold_pct: 0.0005,
-            ticker_poll_interval_sec: 60,
-        }
-    }
-}
-
-fn default_true() -> bool {
-    true
-}
-fn default_max_funding() -> f64 {
-    0.0001
-}
-fn default_basis_threshold() -> f64 {
-    0.0005
-}
-fn default_ticker_poll_sec() -> u64 {
-    60
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -82,9 +43,6 @@ pub struct DeploymentConfig {
     pub start_futures_pairs: Vec<String>,
     pub max_symbols: usize,
     pub edge_profile_path: String,
-    /// Allow `mode=paper` without edge pass — still never places live orders.
-    #[serde(default)]
-    pub allow_unverified_paper: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -126,24 +84,12 @@ pub struct ExecutionConfig {
     pub max_leverage_futures: u32,
     pub margin_mode: String,
     pub slippage_limit_pct: f64,
-    /// L2 / book VWAP budget (bps) for sizing — not the signal kill threshold.
-    #[serde(default = "default_max_slippage_bps")]
-    pub max_slippage_bps: f64,
-    /// Reject if Bybit mid already moved this far vs Binance ref (bps). Must be > lag_min.
-    #[serde(default = "default_max_adverse_move_bps")]
+    /// Post-decide Bybit move vs signal ref (bps). Not L2 book VWAP slip.
     pub max_adverse_move_bps: f64,
     pub use_limit_fallback: bool,
     pub limit_fallback_timeout_ms: u64,
     pub limit_offset_pct: f64,
     pub slippage_adaptive_resize: bool,
-}
-
-fn default_max_slippage_bps() -> f64 {
-    8.0
-}
-
-fn default_max_adverse_move_bps() -> f64 {
-    15.0
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -225,10 +171,9 @@ pub struct EdgeMeta {
     pub injected_latency_ms: u32,
     pub status: String,
     #[serde(default)]
-    pub research_method: Option<String>,
-    /// `synthetic` | `live` | `binance_vision` — synthetic must not unlock paper/live.
+    pub research_method: String,
     #[serde(default)]
-    pub data_source: Option<String>,
+    pub data_source: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -238,10 +183,8 @@ pub struct EdgeSymbolConfig {
     pub lag_min_bps: f64,
     pub trade_hours_utc: Vec<u32>,
     pub vol_regime_min_atr_pct: f64,
-    /// Book VWAP p95 (sizing).
     #[serde(default)]
     pub max_slippage_bps: Option<f64>,
-    /// Adverse Bybit move vs signal ref kill threshold.
     #[serde(default)]
     pub max_adverse_move_bps: Option<f64>,
 }

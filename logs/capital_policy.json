@@ -1,0 +1,9 @@
+{
+  "initial_deposit_usdt": 300.0,
+  "banked_profit_usdt": 0.0,
+  "max_tradeable_usdt": 300.0,
+  "max_tradeable_pct": 1.0,
+  "compound_pnl": false,
+  "max_notional_per_trade_usdt": null,
+  "max_risk_pct": null
+}
