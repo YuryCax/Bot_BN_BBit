@@ -25,11 +25,12 @@ Goal: put keys in gitignored files, smoke APIs, then deploy the same release to 
 
 Do **not** set `mode=live` until `edge_profile` has `status=pass`, `data_source` ∈ {live,binance_vision}, ≥14 days.
 
-## 2. Package release
+## 5. Package + remote install
 
 ```powershell
 .\scripts\package_release.ps1
-# → dist/bot-release-<utc>.tar.gz
+.\scripts\remote_install.ps1 -Role tokyo -SshHost ubuntu@TOKYO_IP -TarPath dist\bot-release-*.tar.gz
+.\scripts\remote_install.ps1 -Role singapore -SshHost ubuntu@SG_IP -PeerIp TOKYO_PRIVATE_IP -TarPath dist\bot-release-*.tar.gz -SecretsPath .\secrets.env
 ```
 
 ## 3. AWS network

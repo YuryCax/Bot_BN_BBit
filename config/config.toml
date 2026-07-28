@@ -4,7 +4,8 @@
 [capital]
 initial_futures_deposit_usdt = 300.0
 initial_spot_deposit_usdt = 0.0
-risk_per_trade_pct = 0.01
+# Margin fraction of deposit per live trade (staged); keep small until edge proven.
+risk_per_trade_pct = 0.02
 
 [deployment]
 mode = "dev"
@@ -26,9 +27,10 @@ log_tick_debug = false
 tokio_worker_threads = 2
 
 [lag]
-impulse_min_bps = 5.0
-lag_min_bps = 3.0
-follow_through_min = 0.40
+# Residual must clear fees after capture_est (see EntryEngine); ~32 bps × 0.6 ≈ fee floor.
+impulse_min_bps = 12.0
+lag_min_bps = 32.0
+follow_through_min = 0.45
 convergence_exit_ratio = 0.75
 time_stop_ms = 8000
 capture_est = 0.6
@@ -53,11 +55,11 @@ heartbeat_emergency_timeout_ms = 500
 spot_min_tp_pct = 0.008
 
 [execution]
-default_leverage_futures = 10
-max_leverage_futures = 20
+default_leverage_futures = 5
+max_leverage_futures = 5
 margin_mode = "isolated"
 slippage_limit_pct = 0.0005
-max_adverse_move_bps = 15.0
+max_adverse_move_bps = 12.0
 use_limit_fallback = true
 limit_fallback_timeout_ms = 50
 limit_offset_pct = 0.0001
@@ -69,11 +71,11 @@ max_daily_drawdown_futures = 0.015
 correlation_limit_btc_eth = 0.6
 correlation_limit_eth_when_btc_open = 0.3
 atr_multiplier_stop = 1.8
-atr_min_filter = 0.002
+atr_min_filter = 0.0008
 
 [take_profit]
 enabled = true
-initial_target_pct = 0.005
+initial_target_pct = 0.004
 partial_close_pct = 0.5
 trail_arm_pct = 0.003
 sl_breakeven_pct = 0.003
@@ -83,9 +85,9 @@ extended_trend_tp = true
 extended_trend_z_min = 2.0
 
 [signals]
-z_score_entry = 2.5
+z_score_entry = 2.0
 z_score_exit = 0.5
-velocity_min = 0.0001
+velocity_min = 0.00015
 
 [noise_filter]
 min_trade_volume_usd = 10000.0

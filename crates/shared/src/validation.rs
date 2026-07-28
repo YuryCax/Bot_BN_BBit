@@ -218,6 +218,7 @@ mod tests {
                 ws_push_interval_ms: 2000,
                 audit_log_path: "/var/log/bot/panel_audit.jsonl".into(),
             },
+            funding_basis: FundingBasisConfig::default(),
         }
     }
 

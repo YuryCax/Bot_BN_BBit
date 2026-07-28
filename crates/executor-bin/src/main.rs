@@ -164,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.fees.d_min_net_futures(),
         cfg.signals.z_score_entry,
         cfg.signals.velocity_min,
+        cfg.risk.atr_min_filter,
     ));
 
     let metrics: Arc<Mutex<HashMap<u16, SymbolMetrics>>> =
@@ -212,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
 
     let warm = Arc::new(Mutex::new(WarmRiskState {
         max_daily_dd_futures: cfg.risk.max_daily_drawdown_futures,
-        max_funding_rate: 0.0001,
+        max_funding_rate: cfg.funding_basis.max_funding_rate,
         min_book_depth_usd: 5_000.0,
         book_depth_usd: 50_000.0,
         ..Default::default()
@@ -591,6 +592,10 @@ async fn main() -> anyhow::Result<()> {
                 if !(operator_halt || safe_mode.halt_entries() || warm.lock().unwrap().entries_halted) {
                 match risk.check_entry(&pkt) {
                     RiskDecision::Open => {
+                        // Small-account monetization: at most one open futures position.
+                        if !positions.is_empty() {
+                            continue;
+                        }
                         if has_open_for_symbol(&positions, sid) {
                             continue;
                         }

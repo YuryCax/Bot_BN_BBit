@@ -94,11 +94,18 @@ impl Default for RiskEngine {
 }
 
 impl RiskEngine {
-    pub fn adverse_move_bps(ref_price: f64, bybit_mid: f64) -> f32 {
+    pub fn adverse_move_bps(ref_price: f64, bybit_mid: f64, direction_bias: i8) -> f32 {
         if ref_price <= 0.0 || bybit_mid <= 0.0 {
             return f32::MAX;
         }
-        (((bybit_mid - ref_price) / ref_price).abs() * 10_000.0) as f32
+        let signed = ((bybit_mid - ref_price) / ref_price * 10_000.0) as f32;
+        match direction_bias {
+            // Long: edge dies when Bybit already rallied toward/through signal
+            d if d > 0 => signed.max(0.0),
+            // Short: edge dies when Bybit already sold off
+            d if d < 0 => (-signed).max(0.0),
+            _ => signed.abs(),
+        }
     }
 
     pub fn check_entry(&mut self, packet: &MarketStatePacket) -> RiskDecision {
@@ -130,7 +137,8 @@ impl RiskEngine {
         } else {
             packet.ref_price
         };
-        let move_bps = Self::adverse_move_bps(packet.ref_price, bybit);
+        let move_bps =
+            Self::adverse_move_bps(packet.ref_price, bybit, packet.direction_bias);
         if move_bps > self.max_adverse_move_bps {
             return RiskDecision::AdverseMoveExceeded;
         }
@@ -163,7 +171,8 @@ mod tests {
         let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
         p.entry_valid = 1;
         p.ref_price = 100.0;
-        p.bybit_mid_ref = 100.1; // 10 bps
+        p.bybit_mid_ref = 100.1; // 10 bps up — adverse for long
+        p.direction_bias = 1;
         p.d_exp = 1.0;
         p.d_min = 0.1;
         assert_eq!(re.check_entry(&p), RiskDecision::AdverseMoveExceeded);
@@ -172,7 +181,6 @@ mod tests {
     #[test]
     fn accepts_open_lag_within_adverse() {
         set_warm_flags(RiskFlags::all_futures());
-        // lag_min ~3 bps open is fine if adverse limit is 15
         let mut re = RiskEngine {
             max_adverse_move_bps: 15.0,
             ..Default::default()
@@ -180,9 +188,27 @@ mod tests {
         let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
         p.entry_valid = 1;
         p.ref_price = 100.0;
-        p.bybit_mid_ref = 99.96; // 4 bps — open lag, not caught up yet
+        p.bybit_mid_ref = 99.96; // Bybit still below — remaining long edge, not adverse
+        p.direction_bias = 1;
         p.d_exp = 1.0;
         p.d_min = 0.1;
         assert_eq!(re.check_entry(&p), RiskDecision::Open);
+    }
+
+    #[test]
+    fn short_adverse_when_bybit_already_down() {
+        set_warm_flags(RiskFlags::all_futures());
+        let mut re = RiskEngine {
+            max_adverse_move_bps: 5.0,
+            ..Default::default()
+        };
+        let mut p = MarketStatePacket::neutral(1, utc_now_ns(), 1);
+        p.entry_valid = 1;
+        p.direction_bias = -1;
+        p.ref_price = 100.0;
+        p.bybit_mid_ref = 99.9; // 10 bps down — adverse for short
+        p.d_exp = 1.0;
+        p.d_min = 0.1;
+        assert_eq!(re.check_entry(&p), RiskDecision::AdverseMoveExceeded);
     }
 }

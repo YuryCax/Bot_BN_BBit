@@ -12,26 +12,26 @@ data_source = "synthetic"
 [edge.BTCUSDT]
 net_edge_bps = 4.48
 follow_through_min = 0.55
-lag_min_bps = 3.0
+lag_min_bps = 32.0
 trade_hours_utc = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23]
 vol_regime_min_atr_pct = 0.0025
 max_slippage_bps = 0.52
-max_adverse_move_bps = 15.0
+max_adverse_move_bps = 12.0
 
 [edge.ETHUSDT]
 net_edge_bps = 3.72
 follow_through_min = 0.55
-lag_min_bps = 3.0
+lag_min_bps = 32.0
 trade_hours_utc = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
 vol_regime_min_atr_pct = 0.0025
 max_slippage_bps = 0.52
-max_adverse_move_bps = 15.0
+max_adverse_move_bps = 12.0
 
 [edge.SOLUSDT]
 net_edge_bps = -5.2
 follow_through_min = 0.55
-lag_min_bps = 3.0
+lag_min_bps = 32.0
 trade_hours_utc = []
 vol_regime_min_atr_pct = 0.0025
 max_slippage_bps = 1.11
-max_adverse_move_bps = 15.0
+max_adverse_move_bps = 12.0

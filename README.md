@@ -19,11 +19,13 @@ Low-latency cross-exchange lead-lag: **Binance Futures (Tokyo signal) → Bybit 
 # 4) Real edge research (≥14d L2) before paper/live
 .\scripts\run_quant_hardening.ps1 -Days 14 -LiveDownload
 
-# 5) Package for AWS
+# 5) Package + AWS (scp+ssh one-shot)
 .\scripts\package_release.ps1
+.\scripts\remote_install.ps1 -Role tokyo -SshHost ubuntu@TOKYO -TarPath dist\bot-release-XXXX.tar.gz
+.\scripts\remote_install.ps1 -Role singapore -SshHost ubuntu@SG -PeerIp TOKYO_PRIV -TarPath dist\bot-release-XXXX.tar.gz -SecretsPath .\secrets.env
 ```
 
-Deploy Tokyo + Singapore: **[`deploy/AWS_QUICKSTART.md`](deploy/AWS_QUICKSTART.md)**  
+Deploy details: **[`deploy/AWS_QUICKSTART.md`](deploy/AWS_QUICKSTART.md)**  
 Gates: [`deploy/NO_LIVE_UNTIL_PASS.md`](deploy/NO_LIVE_UNTIL_PASS.md) · staged live: [`deploy/STAGED_LIVE.md`](deploy/STAGED_LIVE.md)
 
 Keep `mode = "dev"` until edge `status=pass` on real L2. Never commit `secrets.env`.

@@ -14,10 +14,17 @@ pub struct EntryEngine {
     pub lag_min_bps: f32,
     pub impulse_min_bps: f32,
     pub capture_est: f32,
+    pub atr_min_frac: f64,
 }
 
 impl EntryEngine {
-    pub fn from_config(lag: &LagConfig, d_min_net: f64, z_threshold: f64, velocity_min: f64) -> Self {
+    pub fn from_config(
+        lag: &LagConfig,
+        d_min_net: f64,
+        z_threshold: f64,
+        velocity_min: f64,
+        atr_min_frac: f64,
+    ) -> Self {
         Self {
             z_threshold,
             velocity_min,
@@ -28,6 +35,7 @@ impl EntryEngine {
             lag_min_bps: lag.lag_min_bps,
             impulse_min_bps: lag.impulse_min_bps,
             capture_est: lag.capture_est,
+            atr_min_frac,
         }
     }
 
@@ -44,7 +52,7 @@ impl EntryEngine {
         let z = metrics.welford.z_score(mid) as f32;
         let vel = crate::math::velocity(mid, metrics.price_at_age_ms(100)) as f32;
         let sigma = metrics.welford.sigma() as f32;
-        // z-score is unitless; convert price sigma to fraction of mid for fee-comparable d_exp
+        // Price sigma → fraction of mid (fee-comparable with d_min_net).
         let sigma_frac = if mid > 0.0 { sigma / mid as f32 } else { 0.0 };
         let mut d_exp = self.alpha * z.abs() * sigma_frac + self.beta * vel.abs() * self.delta_t;
         if vel < 0.0 && d_exp > 0.0 {
@@ -56,21 +64,34 @@ impl EntryEngine {
         let mut entry_valid = 0u8;
         let mut direction_bias = 0i8;
 
+        // residual_bps → price fraction × capture ≥ round-trip fee floor
+        let expected_capture =
+            (lag_residual_bps.abs() as f64 / 10_000.0) * self.capture_est as f64;
         let lag_open = lag_residual_bps.abs() >= self.lag_min_bps;
         let impulse_ok = impulse_bps.abs() >= self.impulse_min_bps;
-        let edge_ok =
-            d_exp >= d_min && (lag_residual_bps.abs() * self.capture_est) >= d_min;
+        let edge_ok = d_exp as f64 >= self.d_min_net && expected_capture >= self.d_min_net;
+        let atr_frac = if mid > 0.0 {
+            metrics.atr / mid
+        } else {
+            0.0
+        };
+        let atr_ok = self.atr_min_frac <= 0.0 || atr_frac >= self.atr_min_frac;
 
-        if !bybit_stale && trade_hour_ok && lag_open && impulse_ok && edge_ok {
+        if !bybit_stale && trade_hour_ok && lag_open && impulse_ok && edge_ok && atr_ok {
             let z_ok = z.abs() >= self.z_threshold as f32;
             if z_ok {
-                if vel > self.velocity_min as f32
+                // Long only when Binance led up and Bybit still lags (residual > 0).
+                if lag_residual_bps > 0.0
+                    && impulse_bps > 0.0
+                    && vel > self.velocity_min as f32
                     && metrics.ema_50 > metrics.ema_200
                     && self.regime_allows_long(regime)
                 {
                     entry_valid = 1;
                     direction_bias = 1;
-                } else if vel < -(self.velocity_min as f32)
+                } else if lag_residual_bps < 0.0
+                    && impulse_bps < 0.0
+                    && vel < -(self.velocity_min as f32)
                     && metrics.ema_50 < metrics.ema_200
                     && self.regime_allows_short(regime)
                 {
@@ -115,5 +136,50 @@ impl EntryEngine {
 
     fn regime_allows_short(&self, regime: u8) -> bool {
         matches!(regime, 0 | 1) || regime == Regime::Trend as u8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::config::LagConfig;
+
+    fn lag_cfg() -> LagConfig {
+        LagConfig {
+            impulse_min_bps: 5.0,
+            lag_min_bps: 3.0,
+            follow_through_min: 0.4,
+            convergence_exit_ratio: 0.75,
+            time_stop_ms: 8000,
+            capture_est: 0.6,
+            bybit_mid_feed_hz: 50,
+            bybit_mid_max_staleness_ms: 200,
+            bybit_mid_feed_timeout_ms: 500,
+        }
+    }
+
+    #[test]
+    fn residual_must_clear_fees_in_fraction_units() {
+        // 10 bps residual × 0.6 capture = 6 bps < ~19 bps fees → no entry from edge alone
+        let eng = EntryEngine::from_config(&lag_cfg(), 0.0019, 0.0, 0.0, 0.0);
+        let mut m = SymbolMetrics::default();
+        for i in 0..50 {
+            m.push_price(100.0 + (i as f64) * 0.01);
+        }
+        let pkt = eng.evaluate(&m, 100.5, 10.0, 12.0, false, true);
+        assert_eq!(pkt.entry_valid, 0);
+    }
+
+    #[test]
+    fn short_requires_negative_residual() {
+        let eng = EntryEngine::from_config(&lag_cfg(), 0.00001, 0.0, 0.0, 0.0);
+        let mut m = SymbolMetrics::default();
+        for i in 0..80 {
+            m.push_price(100.0 - (i as f64) * 0.05);
+        }
+        let mid = 100.0 - 79.0 * 0.05;
+        // Positive residual must not open a short
+        let pkt = eng.evaluate(&m, mid, 40.0, -40.0, false, true);
+        assert_ne!(pkt.direction_bias, -1);
     }
 }
