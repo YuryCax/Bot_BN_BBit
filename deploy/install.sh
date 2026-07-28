@@ -27,6 +27,9 @@ done
 chmod 755 /opt/bot/bin/* 2>/dev/null || true
 
 install -m 644 "$SRC"/etc/*.toml /etc/bot/ 2>/dev/null || true
+if [[ -f /etc/bot/config.production.toml ]]; then
+  install -m 644 /etc/bot/config.production.toml /etc/bot/config.toml
+fi
 if [[ -f /etc/bot/config.toml ]]; then
   sed -i 's|edge_profile_path = "config/edge_profile.toml"|edge_profile_path = "/etc/bot/edge_profile.toml"|' /etc/bot/config.toml || true
 fi

@@ -27,10 +27,10 @@ paper_summary*
 # Release packages
 /dist/
 
-# Rust (future)
+# Rust
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is committed for reproducible AWS releases
 
 # Python (Edge Research / Analyst)
 .venv/

@@ -1,14 +1,13 @@
-# Canonical config — see docs/SPEC.md §10.1
-# Live forbidden until config/edge_profile.toml has net_edge_bps > 0 (§9.0)
+# AWS/production template — install.sh copies this over config.toml on hosts.
+# Keep mode=dev until edge pass; then paper → live + BOT_ALLOW_MAINNET=1 for staged monetization.
 
 [capital]
 initial_futures_deposit_usdt = 300.0
 initial_spot_deposit_usdt = 0.0
-risk_per_trade_pct = 0.002
+# Margin fraction of deposit per live trade (staged); keep small until edge proven.
+risk_per_trade_pct = 0.02
 
 [deployment]
-# Mode: "dev" = wiring (edge skipped). "paper" needs edge pass OR allow_unverified_paper=true (sim only).
-# "live" always needs edge pass and places real orders. Mainnet also needs BOT_ALLOW_MAINNET=1.
 mode = "dev"
 observer_instance_type = "t3.micro"
 executor_instance_type = "t3.small"
@@ -16,11 +15,10 @@ spot_enabled = false
 min_futures_pf_for_spot = 1.3
 start_futures_pairs = ["BTCUSDT", "ETHUSDT"]
 max_symbols = 35
-edge_profile_path = "config/edge_profile.toml"
-allow_unverified_paper = false
+edge_profile_path = "/etc/bot/edge_profile.toml"
 
 [resources]
-depth_enabled = true
+depth_enabled = false
 binance_ws_connections = 1
 zenoh_publish_hz_cap = 100
 observer_ram_soft_limit_mib = 400
@@ -29,6 +27,7 @@ log_tick_debug = false
 tokio_worker_threads = 2
 
 [lag]
+# Residual must clear fees after capture_est (see EntryEngine); ~32 bps × 0.6 ≈ fee floor.
 impulse_min_bps = 12.0
 lag_min_bps = 32.0
 follow_through_min = 0.45
@@ -141,7 +140,7 @@ prometheus_endpoint = "/metrics"
 
 [control_panel]
 enabled = true
-bind_addr = "127.0.0.1:8080"
+bind_addr = "0.0.0.0:8080"
 auth_mode = "jwt"
 jwt_secret_env = "PANEL_JWT_SECRET"
 default_spot_alloc_pct = 0.05
@@ -157,3 +156,6 @@ pairs = [
   "OPUSDT", "NEARUSDT", "PEPEUSDT", "WIFUSDT", "FETUSDT", "RENDERUSDT",
   "ENAUSDT", "SUIUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "WLDUSDT", "NOTUSDT",
 ]
+
+# Deploy as /etc/bot/config.toml on AWS after edge pass. Keep mode=dev until then; set live + BOT_ALLOW_MAINNET=1 only for staged monetization.
+

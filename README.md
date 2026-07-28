@@ -12,14 +12,17 @@ Low-latency cross-exchange lead-lag: **Binance Futures (Tokyo signal) → Bybit 
 # 2) Wiring smoke (public WS, no orders)
 .\scripts\smoke_mono_node.ps1
 
-# 3) Authenticated Bybit testnet order lifecycle
+# 3) Production preflight (tests + edge gate check)
+.\scripts\preflight.ps1
+
+# 4) Authenticated Bybit testnet order lifecycle
 .\scripts\Import-BotSecrets.ps1
 .\scripts\smoke_bybit_testnet.ps1
 
-# 4) Real edge research (≥14d L2) before paper/live
+# 5) Real L2 edge (≥14d) before paper/live
 .\scripts\run_quant_hardening.ps1 -Days 14 -LiveDownload
 
-# 5) Package + AWS (scp+ssh one-shot)
+# 6) Package + AWS
 .\scripts\package_release.ps1
 .\scripts\remote_install.ps1 -Role tokyo -SshHost ubuntu@TOKYO -TarPath dist\bot-release-XXXX.tar.gz
 .\scripts\remote_install.ps1 -Role singapore -SshHost ubuntu@SG -PeerIp TOKYO_PRIV -TarPath dist\bot-release-XXXX.tar.gz -SecretsPath .\secrets.env

@@ -12,6 +12,7 @@ Environment=BOT_SYMBOLS=/etc/bot/symbols.toml
 Environment=BOT_ZENOH_CONFIG=/etc/bot/zenoh.json5
 Environment=BOT_LEDGER=/var/log/bot/paper_ledger.jsonl
 Environment=BOT_PACKET_LOG=/var/log/bot/packets.bin
+Environment=BOT_STATUS=/var/log/bot/runtime_status.json
 ExecStart=/opt/bot/bin/executor
 Restart=always
 RestartSec=5

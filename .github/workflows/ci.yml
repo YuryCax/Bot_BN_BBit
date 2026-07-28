@@ -18,7 +18,9 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: test
-        run: cargo test --all
+        run: cargo test --workspace --all-targets
+      - name: release build
+        run: cargo build --release --workspace
 
   python-research:
     runs-on: ubuntu-latest

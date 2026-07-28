@@ -64,6 +64,36 @@ async fn place_reduce_only_close(
     Ok(())
 }
 
+async fn cancel_exchange_stop(api: &BybitConnector, symbol: &str, stop_id: &Option<String>) {
+    let Some(oid) = stop_id.as_ref() else {
+        return;
+    };
+    match api.cancel_order(symbol, oid).await {
+        Ok(_) => info!("cancelled exchange stop {oid} on {symbol}"),
+        Err(e) => warn!("cancel stop {oid} on {symbol}: {e}"),
+    }
+}
+
+fn write_runtime_status(
+    path: &str,
+    mode: &str,
+    live_orders: bool,
+    positions: usize,
+    operator_halt: bool,
+    hb_age_ms: u128,
+    safe_phase: &str,
+    ledger_net: f64,
+) {
+    let body = format!(
+        "{{\n  \"ts_unix\": {},\n  \"mode\": \"{mode}\",\n  \"live_orders\": {live_orders},\n  \"positions\": {positions},\n  \"operator_halt\": {operator_halt},\n  \"heartbeat_age_ms\": {hb_age_ms},\n  \"safe_mode\": \"{safe_phase}\",\n  \"ledger_net\": {ledger_net:.6}\n}}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    let _ = std::fs::write(path, body);
+}
+
 fn has_open_for_symbol(positions: &HashMap<String, PositionState>, symbol_id: u16) -> bool {
     positions.values().any(|p| p.symbol_id == symbol_id)
 }
@@ -225,6 +255,21 @@ async fn main() -> anyhow::Result<()> {
     if live_orders && bybit_api.is_none() {
         anyhow::bail!("mode=live requires BYBIT_API_KEY / BYBIT_API_SECRET");
     }
+    if live_orders {
+        if let Some(api) = &bybit_api {
+            if !api.testnet {
+                let allow = std::env::var("BOT_ALLOW_MAINNET")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if !allow {
+                    anyhow::bail!(
+                        "mode=live on Bybit mainnet requires BOT_ALLOW_MAINNET=1 after staged gates"
+                    );
+                }
+                warn!("MAINNET live orders enabled (BOT_ALLOW_MAINNET=1)");
+            }
+        }
+    }
     if !live_orders {
         info!(
             "order routing: SIMULATION only (mode={}) — Bybit API will not receive orders",
@@ -239,9 +284,14 @@ async fn main() -> anyhow::Result<()> {
     let ledger_path =
         std::env::var("BOT_LEDGER").unwrap_or_else(|_| "logs/paper_ledger.jsonl".into());
     let log_path = std::env::var("BOT_PACKET_LOG").unwrap_or_else(|_| "logs/packets.bin".into());
+    let status_path =
+        std::env::var("BOT_STATUS").unwrap_or_else(|_| "logs/runtime_status.json".into());
     let packet_log = Arc::new(Mutex::new(
         PacketLogWriter::open(&log_path).context("open packet log")?,
     ));
+    if let Some(parent) = std::path::Path::new(&status_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
 
     let mut positions: HashMap<String, PositionState> = HashMap::new();
     if live_orders {
@@ -549,6 +599,7 @@ async fn main() -> anyhow::Result<()> {
                             };
                             if live_orders {
                                 if let Some(api) = &bybit_api {
+                                    cancel_exchange_stop(api, symbol, &pos.exchange_stop_id).await;
                                     if let Err(e) = place_reduce_only_close(
                                         api,
                                         symbol,
@@ -638,6 +689,7 @@ async fn main() -> anyhow::Result<()> {
                         let mut fill_qty = qty;
                         let mut stop_ok = true;
 
+                        let mut stop_oid: Option<String> = None;
                         if live_orders {
                             if let Some(api) = &bybit_api {
                                 match api.fetch_instrument(symbol).await {
@@ -693,7 +745,10 @@ async fn main() -> anyhow::Result<()> {
                                     stop,
                                 );
                                 match api.place_order(&stop_req).await {
-                                    Ok(body) => info!("bybit stop: {body}"),
+                                    Ok(body) => {
+                                        info!("bybit stop: {body}");
+                                        stop_oid = extract_order_id(&body);
+                                    }
                                     Err(e) => {
                                         warn!("bybit stop failed: {e} — halting entries");
                                         stop_ok = false;
@@ -740,7 +795,7 @@ async fn main() -> anyhow::Result<()> {
                                 tp_phase: 0,
                                 partial_done: false,
                                 pnl_pct: 0.0,
-                                exchange_stop_id: None,
+                                exchange_stop_id: stop_oid,
                             },
                         );
                         let _ = stop_ok;
@@ -794,6 +849,7 @@ async fn main() -> anyhow::Result<()> {
                             let px = mid_for_symbol(&lags, pos.symbol_id, pos.entry_price);
                             if live_orders {
                                 if let Some(api) = &bybit_api {
+                                    cancel_exchange_stop(api, symbol, &pos.exchange_stop_id).await;
                                     if let Err(e) = place_reduce_only_close(
                                         api,
                                         symbol,
@@ -821,6 +877,16 @@ async fn main() -> anyhow::Result<()> {
                     let _ = ledger.append_jsonl(&ledger_path);
                 }
 
+                write_runtime_status(
+                    &status_path,
+                    &cfg.deployment.mode,
+                    live_orders,
+                    positions.len(),
+                    operator_halt,
+                    last_hb.elapsed().as_millis(),
+                    &format!("{:?}", safe_mode.phase),
+                    ledger.net_pnl(),
+                );
                 let _ = ledger.write_summary("logs/paper_summary.txt");
             }
         }
