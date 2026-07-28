@@ -49,6 +49,7 @@ impl LagState {
             as f32
     }
 
+    /// Signed residual: impulse not yet reflected in Bybit mid (negative on downside lag).
     pub fn lag_residual_bps(&self, binance_mid: f64) -> f32 {
         let impulse = self.impulse_bps(binance_mid);
         if self.bybit_mid <= 0.0 || self.binance_mid_100ms_ago <= 0.0 {
@@ -56,6 +57,25 @@ impl LagState {
         }
         let bybit_move =
             (self.bybit_mid - self.binance_mid_100ms_ago) / self.binance_mid_100ms_ago * 10_000.0;
-        (impulse - bybit_move as f32).max(0.0)
+        impulse - bybit_move as f32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_side_residual_is_negative_when_bybit_lags_dump() {
+        let state = LagState {
+            bybit_mid: 99.5,
+            bybit_ts_ns: 1,
+            binance_mid_100ms_ago: 100.0,
+            max_staleness_ms: 200,
+        };
+        // Binance dumped to 99.0; Bybit only at 99.5 → residual negative magnitude
+        let r = state.lag_residual_bps(99.0);
+        assert!(r < 0.0, "expected downside residual, got {r}");
+        assert!(r.abs() >= 3.0);
     }
 }

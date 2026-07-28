@@ -1,4 +1,6 @@
-const WINDOW: usize = 1000;
+use shared::time::utc_now_ns;
+
+const RING: usize = 2048;
 
 #[derive(Debug, Clone)]
 pub struct Welford {
@@ -61,7 +63,8 @@ pub fn velocity(price_now: f64, price_100ms_ago: f64) -> f64 {
 #[derive(Debug, Clone)]
 pub struct SymbolMetrics {
     pub welford: Welford,
-    pub prices: [f64; 2048],
+    pub prices: [f64; RING],
+    pub price_ts_ns: [u64; RING],
     pub head: usize,
     pub len: usize,
     pub ema_50: f64,
@@ -76,7 +79,8 @@ impl Default for SymbolMetrics {
     fn default() -> Self {
         Self {
             welford: Welford::default(),
-            prices: [0.0; 2048],
+            prices: [0.0; RING],
+            price_ts_ns: [0; RING],
             head: 0,
             len: 0,
             ema_50: 0.0,
@@ -91,9 +95,11 @@ impl Default for SymbolMetrics {
 
 impl SymbolMetrics {
     pub fn push_price(&mut self, price: f64) {
+        let ts = utc_now_ns();
         self.prices[self.head] = price;
-        self.head = (self.head + 1) % 2048;
-        if self.len < 2048 {
+        self.price_ts_ns[self.head] = ts;
+        self.head = (self.head + 1) % RING;
+        if self.len < RING {
             self.len += 1;
         }
         self.welford.update(price);
@@ -113,12 +119,42 @@ impl SymbolMetrics {
         self.prev_close = price;
     }
 
+    /// Legacy sample-offset lookback (prefer [`Self::price_at_age_ms`]).
     pub fn price_100ms_ago(&self, samples_per_100ms: usize) -> f64 {
-        if self.len <= samples_per_100ms {
-            return self.prices[(self.head + 2048 - 1) % 2048];
+        if self.len == 0 {
+            return 0.0;
         }
-        let idx = (self.head + 2048 - samples_per_100ms) % 2048;
+        if self.len <= samples_per_100ms {
+            return self.prices[(self.head + RING - 1) % RING];
+        }
+        let idx = (self.head + RING - samples_per_100ms) % RING;
         self.prices[idx]
+    }
+
+    /// Price at least `age_ms` before the newest sample (wall-clock via stored timestamps).
+    pub fn price_at_age_ms(&self, age_ms: u64) -> f64 {
+        if self.len == 0 {
+            return 0.0;
+        }
+        let newest_i = (self.head + RING - 1) % RING;
+        let newest_ts = self.price_ts_ns[newest_i];
+        if newest_ts == 0 {
+            return self.price_100ms_ago(1.max((age_ms / 10) as usize));
+        }
+        let target = newest_ts.saturating_sub(age_ms.saturating_mul(1_000_000));
+        let mut chosen = self.prices[newest_i];
+        for k in 0..self.len {
+            let idx = (self.head + RING - 1 - k) % RING;
+            let ts = self.price_ts_ns[idx];
+            if ts == 0 {
+                break;
+            }
+            chosen = self.prices[idx];
+            if ts <= target {
+                break;
+            }
+        }
+        chosen
     }
 
     pub fn regime(&self) -> u8 {
@@ -147,5 +183,17 @@ mod tests {
             w.update(x);
         }
         assert!(w.sigma() > 0.0);
+    }
+
+    #[test]
+    fn price_at_age_returns_older_sample() {
+        let mut m = SymbolMetrics::default();
+        m.push_price(100.0);
+        // Force older timestamp on first sample
+        let first_i = (m.head + RING - 1) % RING;
+        m.price_ts_ns[first_i] = utc_now_ns().saturating_sub(200_000_000);
+        m.push_price(101.0);
+        let older = m.price_at_age_ms(100);
+        assert!(older > 0.0);
     }
 }

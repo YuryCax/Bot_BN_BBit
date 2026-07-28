@@ -1,0 +1,15 @@
+// Singapore executor / panel / telegram — connect to Tokyo private IP.
+// Replace TOKYO_PRIVATE_IP with the Tokyo ENI address (VPC peering / TGW).
+// Copy to /etc/bot/zenoh.json5 and set BOT_ZENOH_CONFIG=/etc/bot/zenoh.json5
+{
+  mode: "peer",
+  listen: {
+    endpoints: ["tcp/0.0.0.0:7447"],
+  },
+  connect: {
+    endpoints: ["tcp/TOKYO_PRIVATE_IP:7447"],
+  },
+  scouting: {
+    multicast: { enabled: false },
+  },
+}

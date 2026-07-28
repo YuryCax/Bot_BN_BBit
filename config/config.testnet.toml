@@ -9,7 +9,7 @@ risk_per_trade_pct = 0.002
 [deployment]
 # Mode: "dev" = wiring (edge skipped). "paper" needs edge pass OR allow_unverified_paper=true (sim only).
 # "live" always needs edge pass and places real orders.
-mode = "live"
+mode = "dev"
 observer_instance_type = "t3.micro"
 executor_instance_type = "t3.small"
 spot_enabled = false

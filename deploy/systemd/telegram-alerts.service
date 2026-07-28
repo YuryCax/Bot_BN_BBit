@@ -5,9 +5,15 @@ After=network.target
 [Service]
 Type=simple
 User=bot
-EnvironmentFile=/etc/bot/.env
+WorkingDirectory=/opt/bot
+EnvironmentFile=-/etc/bot/secrets.env
+EnvironmentFile=-/etc/bot/.env
+Environment=BOT_CONFIG=/etc/bot/config.toml
+Environment=BOT_ZENOH_CONFIG=/etc/bot/zenoh.json5
 ExecStart=/opt/bot/bin/telegram-alerts
 Restart=always
+RestartSec=5
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target

@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use executor_core::bybit::{BybitConnector, OrderRequest};
+use executor_core::bybit::{
+    extract_order_id, BybitConnector, ExchangePosition, OrderRequest,
+};
 use executor_core::paper_ledger::PaperLedger;
 use executor_core::position::PositionManager;
 use executor_core::risk::{RiskDecision, RiskEngine};
 use executor_core::safe_mode::{SafeMode, SafeModePhase};
-use executor_core::trading_mode::allow_live_orders;
+use executor_core::trading_mode::{allow_live_orders, requires_edge_gate};
 use executor_core::warm_risk::WarmRiskState;
 use observer_core::bybit::stream_bybit_mids;
 use observer_core::entry::EntryEngine;
@@ -29,6 +31,89 @@ use shared::validation::validate_startup;
 use shared::zenoh_ipc::ZenohSubscriber;
 use tracing::{info, warn};
 
+fn mid_for_symbol(
+    lags: &Mutex<HashMap<u16, LagState>>,
+    symbol_id: u16,
+    fallback: f64,
+) -> f64 {
+    lags.lock()
+        .unwrap()
+        .get(&symbol_id)
+        .map(|s| s.bybit_mid)
+        .filter(|m| *m > 0.0)
+        .unwrap_or(fallback)
+}
+
+async fn place_reduce_only_close(
+    api: &BybitConnector,
+    symbol: &str,
+    close_side: &str,
+    qty: f64,
+) -> anyhow::Result<()> {
+    let req = OrderRequest::market_reduce(symbol, close_side, qty);
+    let body = api.place_order(&req).await?;
+    if let Some(oid) = extract_order_id(&body) {
+        match api.await_order_fill(symbol, &oid, 25).await {
+            Ok(fill) => info!(
+                "close fill {symbol} qty={:.6} px={:.4}",
+                fill.cum_qty, fill.avg_price
+            ),
+            Err(e) => warn!("close fill poll {symbol}: {e}"),
+        }
+    }
+    Ok(())
+}
+
+fn has_open_for_symbol(positions: &HashMap<String, PositionState>, symbol_id: u16) -> bool {
+    positions.values().any(|p| p.symbol_id == symbol_id)
+}
+
+fn seed_positions_from_exchange(
+    open: &[ExchangePosition],
+    bybit_to_id: &HashMap<String, u16>,
+    atr_mult: f64,
+    tp_pct: f64,
+    pm: &PositionManager,
+) -> HashMap<String, PositionState> {
+    let mut positions = HashMap::new();
+    for ep in open {
+        let Some(&sid) = bybit_to_id.get(&ep.symbol) else {
+            warn!("reconcile: unknown exchange symbol {}", ep.symbol);
+            continue;
+        };
+        let pos_side = if ep.side_buy { Side::Long } else { Side::Short };
+        let (stop, tp) = pm.initial_stops(pos_side, ep.avg_price, 0.0, atr_mult, tp_pct);
+        let pos_id = format!("reconcile-{}", ep.symbol);
+        positions.insert(
+            pos_id.clone(),
+            PositionState {
+                id: pos_id,
+                symbol_id: sid,
+                side: pos_side,
+                instrument: InstrumentType::Futures,
+                entry_price: ep.avg_price,
+                qty: ep.size,
+                qty_remaining: ep.size,
+                open_time_ns: utc_now_ns(),
+                entry_impulse_bps: 0.0,
+                lag_capture_ratio: 0.0,
+                current_stop: stop,
+                current_tp: tp,
+                sl_phase: 0,
+                tp_phase: 0,
+                partial_done: false,
+                pnl_pct: 0.0,
+                exchange_stop_id: None,
+            },
+        );
+        info!(
+            "reconcile seeded {} {:?} size={:.6} avg={:.4}",
+            ep.symbol, pos_side, ep.size, ep.avg_price
+        );
+    }
+    positions
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -44,24 +129,28 @@ async fn main() -> anyhow::Result<()> {
     let symbols = SymbolsFile::load(&symbols_path).context("load symbols")?;
     let edge = EdgeProfile::load(&cfg.deployment.edge_profile_path).context("load edge")?;
 
-    let paper_or_live = matches!(
-        cfg.deployment.mode.to_ascii_lowercase().as_str(),
-        "paper" | "live"
+    let need_edge = requires_edge_gate(
+        &cfg.deployment.mode,
+        cfg.deployment.allow_unverified_paper,
     );
-    validate_startup(&cfg, &symbols, &edge, paper_or_live)
-        .context("startup validation")?;
-    if !paper_or_live {
-        warn!("executor running in dev mode — edge gate skipped");
+    validate_startup(&cfg, &symbols, &edge, need_edge).context("startup validation")?;
+    if !need_edge {
+        warn!(
+            "executor mode={} — edge gate skipped (allow_unverified_paper={})",
+            cfg.deployment.mode, cfg.deployment.allow_unverified_paper
+        );
     }
 
     let registry = SymbolRegistry::from_symbols(&symbols.symbol);
     let mut id_to_bybit: HashMap<u16, String> = HashMap::new();
     let mut id_to_binance: HashMap<u16, String> = HashMap::new();
+    let mut bybit_to_id: HashMap<String, u16> = HashMap::new();
     let mut adverse_by_id: HashMap<u16, f32> = HashMap::new();
     for s in &symbols.symbol {
         if s.enabled {
             id_to_bybit.insert(s.id, s.bybit.clone());
             id_to_binance.insert(s.id, s.binance.clone());
+            bybit_to_id.insert(s.bybit.clone(), s.id);
             if let Some(e) = edge.edges.get(&s.binance) {
                 if let Some(bps) = e.max_adverse_move_bps {
                     adverse_by_id.insert(s.id, bps as f32);
@@ -82,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
     let lags: Arc<Mutex<HashMap<u16, LagState>>> = Arc::new(Mutex::new(HashMap::new()));
     let follow_through: Arc<Mutex<HashMap<u16, FollowThroughTracker>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let book_depths: Arc<Mutex<HashMap<u16, f64>>> = Arc::new(Mutex::new(HashMap::new()));
 
     for s in &symbols.symbol {
         if s.enabled {
@@ -153,6 +243,23 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let mut positions: HashMap<String, PositionState> = HashMap::new();
+    if live_orders {
+        if let Some(api) = &bybit_api {
+            match api.fetch_open_positions().await {
+                Ok(open) => {
+                    positions = seed_positions_from_exchange(
+                        &open,
+                        &bybit_to_id,
+                        cfg.risk.atr_multiplier_stop,
+                        cfg.take_profit.initial_target_pct,
+                        &pm,
+                    );
+                }
+                Err(e) => warn!("startup reconcile failed: {e}"),
+            }
+        }
+    }
+
     let deposit = cfg.capital.initial_futures_deposit_usdt;
     let fee_rate = cfg.fees.futures_taker_pct;
 
@@ -171,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let lags_by = Arc::clone(&lags);
     let warm_by = Arc::clone(&warm);
+    let depths_by = Arc::clone(&book_depths);
     let funding_symbols = bybit_symbols.clone();
     tokio::spawn(async move {
         let _ = stream_bybit_mids(&bybit_symbols, move |tick| {
@@ -182,9 +290,21 @@ async fn main() -> anyhow::Result<()> {
                 state.bybit_ts_ns = utc_now_ns();
             }
             if tick.top_depth_usd > 0.0 {
-                let mut w = warm_by.lock().unwrap();
-                w.book_depth_usd = w.book_depth_usd.max(tick.top_depth_usd);
-                w.publish();
+                depths_by
+                    .lock()
+                    .unwrap()
+                    .insert(symbol_id, tick.top_depth_usd);
+                let min_depth = depths_by
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min);
+                if min_depth.is_finite() {
+                    let mut w = warm_by.lock().unwrap();
+                    w.book_depth_usd = min_depth;
+                    w.publish();
+                }
             }
         })
         .await;
@@ -252,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
     let heartbeat_timeout =
         Duration::from_millis(cfg.network.heartbeat_timeout_ms.max(500));
     let mut last_hb = Instant::now();
+    let mut last_hb_ts_ns: u64 = 0;
     let pending_ft: Arc<Mutex<Vec<(u16, u64, i8, f64)>>> = Arc::new(Mutex::new(Vec::new()));
     let edge = Arc::new(edge);
     let mut operator_halt = false;
@@ -260,6 +381,11 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
+                let src = cmd.source.to_ascii_lowercase();
+                if !(src == "panel" || src == "telegram" || src == "cli") {
+                    warn!("ignoring operator cmd from untrusted source={}", cmd.source);
+                    continue;
+                }
                 info!("operator cmd {:?} from {}", cmd.action, cmd.source);
                 match cmd.action {
                     OperatorAction::HaltEntries => {
@@ -289,17 +415,18 @@ async fn main() -> anyhow::Result<()> {
                     }
                     OperatorAction::StatusPing => {
                         info!(
-                            "status ping live_orders={} halt={} positions={} ledger_net={:.4}",
+                            "status ping live_orders={} halt={} positions={} ledger_net={:.4} last_hb_age_ms={}",
                             live_orders,
                             operator_halt,
                             positions.len(),
-                            ledger.net_pnl()
+                            ledger.net_pnl(),
+                            last_hb.elapsed().as_millis()
                         );
                     }
                 }
             }
             Some(ts) = hb_rx.recv() => {
-                let _ = ts;
+                last_hb_ts_ns = ts;
                 last_hb = Instant::now();
                 safe_mode.on_heartbeat();
                 {
@@ -314,8 +441,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Some(tick) = tick_rx.recv() => {
-                // Heartbeat is dedicated topic only (ADR-003 / Sprint C) — ticks must not mask feed loss.
-
                 let sid = tick.symbol_id;
                 let binance_sym = id_to_binance.get(&sid).cloned().unwrap_or_default();
 
@@ -325,7 +450,7 @@ async fn main() -> anyhow::Result<()> {
                     entry.push_price(tick.mid);
                     let mut lag_map = lags.lock().unwrap();
                     if let Some(lag_state) = lag_map.get_mut(&sid) {
-                        lag_state.binance_mid_100ms_ago = entry.price_100ms_ago(1);
+                        lag_state.binance_mid_100ms_ago = entry.price_at_age_ms(100);
                     }
                 }
 
@@ -350,7 +475,6 @@ async fn main() -> anyhow::Result<()> {
                     .map(|e| e.trade_hours_utc.is_empty() || e.trade_hours_utc.contains(&(hour as u32)))
                     .unwrap_or(true);
 
-                // Resolve FT pending
                 {
                     let mut pending = pending_ft.lock().unwrap();
                     let mut ft_map = follow_through.lock().unwrap();
@@ -395,7 +519,7 @@ async fn main() -> anyhow::Result<()> {
                 );
                 pkt.symbol_id = sid;
                 pkt.seq_num = tick.seq_num;
-                pkt.ts_ns = tick.ts_ns; // age = forwarded tick age
+                pkt.ts_ns = tick.ts_ns;
                 pkt.bybit_mid_ref = lag_state.bybit_mid;
                 pkt.lag_bps = lag_state.lag_bps(tick.mid);
                 pkt.lag_residual_bps = residual;
@@ -413,11 +537,7 @@ async fn main() -> anyhow::Result<()> {
                     let bybit_mid = if pkt.symbol_id == pos.symbol_id && pkt.bybit_mid_ref > 0.0 {
                         pkt.bybit_mid_ref
                     } else {
-                        lags.lock()
-                            .unwrap()
-                            .get(&pos.symbol_id)
-                            .map(|s| s.bybit_mid)
-                            .unwrap_or(pos.entry_price)
+                        mid_for_symbol(&lags, pos.symbol_id, pos.entry_price)
                     };
                     if let Some(reason) = pm.check_exit(pos, bybit_mid, &pkt, utc_now_ns()) {
                         info!("exit {:?} pos={}", reason, pos.id);
@@ -428,12 +548,17 @@ async fn main() -> anyhow::Result<()> {
                             };
                             if live_orders {
                                 if let Some(api) = &bybit_api {
-                                    let req = OrderRequest::market(
-                                        symbol.clone(),
+                                    if let Err(e) = place_reduce_only_close(
+                                        api,
+                                        symbol,
                                         close_side,
                                         pos.qty_remaining,
-                                    );
-                                    let _ = api.place_order(&req).await;
+                                    )
+                                    .await
+                                    {
+                                        warn!("exit order failed: {e}");
+                                        continue;
+                                    }
                                 }
                             }
                             ledger.record_exit(
@@ -455,57 +580,20 @@ async fn main() -> anyhow::Result<()> {
                     positions.remove(&id);
                 }
 
-                if safe_mode.close_all() || flatten_request {
-                    warn!(
-                        "flatten positions (safe_mode={} operator={})",
-                        safe_mode.close_all(),
-                        flatten_request
-                    );
-                    flatten_request = false;
-                    for (id, pos) in positions.drain() {
-                        if let Some(symbol) = id_to_bybit.get(&pos.symbol_id) {
-                            let close_side = match pos.side {
-                                Side::Long => "Sell",
-                                Side::Short => "Buy",
-                            };
-                            if live_orders {
-                                if let Some(api) = &bybit_api {
-                                    let req = OrderRequest::market(
-                                        symbol.clone(),
-                                        close_side,
-                                        pos.qty_remaining,
-                                    );
-                                    let _ = api.place_order(&req).await;
-                                }
-                            }
-                            ledger.record_exit(
-                                symbol,
-                                close_side,
-                                pos.qty_remaining,
-                                pos.entry_price,
-                                pkt.bybit_mid_ref.max(pos.entry_price),
-                                fee_rate,
-                                sim_ledger,
-                                "flatten",
-                            );
-                        }
-                        let _ = id;
-                    }
-                    continue;
-                }
-
                 if operator_halt || safe_mode.halt_entries() || warm.lock().unwrap().entries_halted {
-                    continue;
-                }
-
-                if let Some(bps) = adverse_by_id.get(&sid) {
+                    // still allow flatten via timer branch
+                } else if let Some(bps) = adverse_by_id.get(&sid) {
                     risk.max_adverse_move_bps = *bps;
                 } else {
                     risk.max_adverse_move_bps = cfg.execution.max_adverse_move_bps as f32;
                 }
 
+                if !(operator_halt || safe_mode.halt_entries() || warm.lock().unwrap().entries_halted) {
                 match risk.check_entry(&pkt) {
                     RiskDecision::Open => {
+                        if has_open_for_symbol(&positions, sid) {
+                            continue;
+                        }
                         let Some(symbol) = id_to_bybit.get(&sid) else { continue };
                         let side = if pkt.direction_bias > 0 { "Buy" } else { "Sell" };
                         let alloc = symbols
@@ -520,26 +608,20 @@ async fn main() -> anyhow::Result<()> {
                             .find(|s| s.id == sid)
                             .and_then(|s| s.leverage)
                             .unwrap_or(cfg.execution.default_leverage_futures);
-                        // Staged live: risk_per_trade_pct of deposit as margin
-                        let risk_frac = if cfg.deployment.mode == "live" {
+                        let risk_frac = if cfg.deployment.mode.eq_ignore_ascii_case("live") {
                             cfg.capital.risk_per_trade_pct
                         } else {
                             alloc
                         };
                         let notional = deposit * risk_frac * lev as f64;
-                        let qty = notional / pkt.ref_price.max(1.0);
-
-                        info!(
-                            "entry {} {} qty={:.6} lag_res={:.2} adverse_lim={:.1} live={}",
-                            symbol, side, qty, pkt.lag_residual_bps, risk.max_adverse_move_bps, live_orders
-                        );
+                        let mut qty = notional / pkt.ref_price.max(1.0);
 
                         let pos_side = if pkt.direction_bias > 0 {
                             Side::Long
                         } else {
                             Side::Short
                         };
-                        let (stop, tp) = pm.initial_stops(
+                        let (mut stop, mut tp) = pm.initial_stops(
                             pos_side,
                             pkt.ref_price,
                             pkt.atr,
@@ -547,28 +629,83 @@ async fn main() -> anyhow::Result<()> {
                             cfg.take_profit.initial_target_pct,
                         );
 
+                        let mut fill_px = pkt.ref_price;
+                        let mut fill_qty = qty;
+                        let mut stop_ok = true;
+
                         if live_orders {
                             if let Some(api) = &bybit_api {
+                                match api.fetch_instrument(symbol).await {
+                                    Ok(filt) => {
+                                        stop = filt.round_price(stop);
+                                        tp = filt.round_price(tp);
+                                        match filt.round_qty(qty) {
+                                            Some(q) => qty = q,
+                                            None => {
+                                                warn!("qty below min for {symbol}");
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("instrument {symbol}: {e}");
+                                        continue;
+                                    }
+                                }
+                                if let Err(e) = api.set_leverage(symbol, lev).await {
+                                    warn!("set_leverage {symbol}: {e}");
+                                }
                                 let req = OrderRequest::market(symbol.clone(), side, qty);
                                 match api.place_order(&req).await {
-                                    Ok(body) => info!("bybit order: {body}"),
-                                    Err(e) => warn!("bybit order failed: {e}"),
+                                    Ok(body) => {
+                                        info!("bybit order: {body}");
+                                        if let Some(oid) = extract_order_id(&body) {
+                                            match api.await_order_fill(symbol, &oid, 40).await {
+                                                Ok(fill) => {
+                                                    fill_px = fill.avg_price;
+                                                    fill_qty = fill.cum_qty;
+                                                }
+                                                Err(e) => {
+                                                    warn!("entry fill missing: {e}");
+                                                    continue;
+                                                }
+                                            }
+                                        } else {
+                                            warn!("entry missing orderId");
+                                            continue;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("bybit order failed: {e}");
+                                        continue;
+                                    }
                                 }
                                 let stop_side = if pos_side == Side::Long { "Sell" } else { "Buy" };
                                 let stop_req = OrderRequest::stop_market(
                                     symbol.clone(),
                                     stop_side,
-                                    qty,
+                                    fill_qty,
                                     stop,
                                 );
                                 match api.place_order(&stop_req).await {
                                     Ok(body) => info!("bybit stop: {body}"),
-                                    Err(e) => warn!("bybit stop failed: {e}"),
+                                    Err(e) => {
+                                        warn!("bybit stop failed: {e} — halting entries");
+                                        stop_ok = false;
+                                        operator_halt = true;
+                                        warm.lock().unwrap().entries_halted = true;
+                                        warm.lock().unwrap().publish();
+                                    }
                                 }
                             }
                         }
 
-                        ledger.record_entry(symbol, side, qty, pkt.ref_price, fee_rate, sim_ledger);
+                        info!(
+                            "entry {} {} qty={:.6} fill_px={:.4} lag_res={:.2} live={}",
+                            symbol, side, fill_qty, fill_px, pkt.lag_residual_bps, live_orders
+                        );
+
+                        ledger.record_entry(symbol, side, fill_qty, fill_px, fee_rate, sim_ledger);
                         let _ = ledger.append_jsonl(&ledger_path);
 
                         pending_ft.lock().unwrap().push((
@@ -586,9 +723,9 @@ async fn main() -> anyhow::Result<()> {
                                 symbol_id: sid,
                                 side: pos_side,
                                 instrument: InstrumentType::Futures,
-                                entry_price: pkt.ref_price,
-                                qty,
-                                qty_remaining: qty,
+                                entry_price: fill_px,
+                                qty: fill_qty,
+                                qty_remaining: fill_qty,
                                 open_time_ns: utc_now_ns(),
                                 entry_impulse_bps: pkt.impulse_bps_100ms,
                                 lag_capture_ratio: 0.0,
@@ -601,6 +738,7 @@ async fn main() -> anyhow::Result<()> {
                                 exchange_stop_id: None,
                             },
                         );
+                        let _ = stop_ok;
                     }
                     RiskDecision::Stale => warn!("stale tick seq={}", pkt.seq_num),
                     RiskDecision::AdverseMoveExceeded => {
@@ -611,6 +749,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     RiskDecision::Duplicate | RiskDecision::Skip => {}
                 }
+                } // end entries allowed
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
                 if last_hb.elapsed() > heartbeat_timeout {
@@ -627,11 +766,56 @@ async fn main() -> anyhow::Result<()> {
                     }
                     if safe_mode.phase != SafeModePhase::Normal {
                         warn!(
-                            "heartbeat miss phase={:?} consecutive={}",
-                            safe_mode.phase, safe_mode.consecutive_misses
+                            "heartbeat miss phase={:?} consecutive={} last_hb_ts={}",
+                            safe_mode.phase, safe_mode.consecutive_misses, last_hb_ts_ns
                         );
                     }
                 }
+
+                // Emergency / operator flatten without waiting for Binance tick
+                if (safe_mode.close_all() || flatten_request) && !positions.is_empty() {
+                    warn!(
+                        "flatten positions (safe_mode={} operator={})",
+                        safe_mode.close_all(),
+                        flatten_request
+                    );
+                    flatten_request = false;
+                    for (_id, pos) in positions.drain() {
+                        if let Some(symbol) = id_to_bybit.get(&pos.symbol_id) {
+                            let close_side = match pos.side {
+                                Side::Long => "Sell",
+                                Side::Short => "Buy",
+                            };
+                            let px = mid_for_symbol(&lags, pos.symbol_id, pos.entry_price);
+                            if live_orders {
+                                if let Some(api) = &bybit_api {
+                                    if let Err(e) = place_reduce_only_close(
+                                        api,
+                                        symbol,
+                                        close_side,
+                                        pos.qty_remaining,
+                                    )
+                                    .await
+                                    {
+                                        warn!("flatten order failed: {e}");
+                                    }
+                                }
+                            }
+                            ledger.record_exit(
+                                symbol,
+                                close_side,
+                                pos.qty_remaining,
+                                pos.entry_price,
+                                px,
+                                fee_rate,
+                                sim_ledger,
+                                "flatten",
+                            );
+                        }
+                    }
+                    let _ = ledger.append_jsonl(&ledger_path);
+                }
+
                 let _ = ledger.write_summary("logs/paper_summary.txt");
             }
         }

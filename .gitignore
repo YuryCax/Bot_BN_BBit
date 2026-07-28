@@ -12,7 +12,12 @@ research/data/
 
 # Logs & replay
 *.bin
+*.jsonl
 /var/log/bot/
+/logs/
+logs/
+paper_ledger*
+paper_summary*
 
 # Rust (future)
 /target/

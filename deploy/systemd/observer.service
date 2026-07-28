@@ -6,11 +6,14 @@ After=network.target
 Type=simple
 User=bot
 WorkingDirectory=/opt/bot
+EnvironmentFile=-/etc/bot/secrets.env
 Environment=BOT_CONFIG=/etc/bot/config.toml
 Environment=BOT_SYMBOLS=/etc/bot/symbols.toml
+Environment=BOT_ZENOH_CONFIG=/etc/bot/zenoh.json5
 ExecStart=/opt/bot/bin/observer
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target

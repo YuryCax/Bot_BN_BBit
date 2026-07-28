@@ -1,0 +1,17 @@
+// Tokyo observer — listen for Singapore peer connect.
+// Copy to /etc/bot/zenoh.json5 and set BOT_ZENOH_CONFIG=/etc/bot/zenoh.json5
+{
+  mode: "peer",
+  listen: {
+    endpoints: ["tcp/0.0.0.0:7447"],
+  },
+  connect: {
+    endpoints: [
+      // Optional: also dial Singapore if SG does not initiate
+      // "tcp/SINGAPORE_PRIVATE_IP:7447",
+    ],
+  },
+  scouting: {
+    multicast: { enabled: false },
+  },
+}

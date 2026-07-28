@@ -34,10 +34,18 @@ async fn main() -> anyhow::Result<()> {
         cfg.deployment.mode.to_ascii_lowercase().as_str(),
         "paper" | "live"
     );
-    validate_startup(&cfg, &symbols, &edge, paper_or_live)
+    let need_edge = match cfg.deployment.mode.to_ascii_lowercase().as_str() {
+        "live" => true,
+        "paper" => !cfg.deployment.allow_unverified_paper,
+        _ => false,
+    };
+    validate_startup(&cfg, &symbols, &edge, need_edge)
         .context("startup validation")?;
-    if !paper_or_live {
-        warn!("observer running in dev mode — edge gate skipped");
+    if !need_edge {
+        warn!(
+            "observer mode={} — edge gate skipped (paper_or_live={paper_or_live})",
+            cfg.deployment.mode
+        );
     }
 
     let registry = SymbolRegistry::from_symbols(&symbols.symbol);

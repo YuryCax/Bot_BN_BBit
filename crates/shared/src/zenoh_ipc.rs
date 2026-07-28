@@ -1,10 +1,33 @@
 //! Zenoh IPC — ADR-003 (Tokyo forwarder / Singapore entry)
 
 use postcard::{from_bytes, to_allocvec};
-use tracing::warn;
+use tracing::{info, warn};
 use zenoh::bytes::ZBytes;
 
 use crate::packet::{BinanceTick, BybitMidFeed, MarketStatePacket, OperatorCommand};
+
+/// Load Zenoh config: `BOT_ZENOH_CONFIG` path, else `ZENOH_CONFIG`, else default (local scout).
+pub fn load_zenoh_config() -> anyhow::Result<zenoh::Config> {
+    if let Ok(path) = std::env::var("BOT_ZENOH_CONFIG") {
+        info!("zenoh config from BOT_ZENOH_CONFIG={path}");
+        return zenoh::Config::from_file(&path)
+            .map_err(|e| anyhow::anyhow!("zenoh Config::from_file({path}): {e}"));
+    }
+    if std::env::var(zenoh::Config::DEFAULT_CONFIG_PATH_ENV).is_ok() {
+        info!("zenoh config from {}", zenoh::Config::DEFAULT_CONFIG_PATH_ENV);
+        return zenoh::Config::from_env()
+            .map_err(|e| anyhow::anyhow!("zenoh Config::from_env: {e}"));
+    }
+    info!("zenoh config: default (set BOT_ZENOH_CONFIG for dual-node)");
+    Ok(zenoh::Config::default())
+}
+
+async fn open_session() -> anyhow::Result<zenoh::Session> {
+    let config = load_zenoh_config()?;
+    zenoh::open(config)
+        .await
+        .map_err(|e| anyhow::anyhow!("zenoh open: {e}"))
+}
 
 pub struct ZenohPublisher {
     session: zenoh::Session,
@@ -12,10 +35,9 @@ pub struct ZenohPublisher {
 
 impl ZenohPublisher {
     pub async fn open() -> anyhow::Result<Self> {
-        let session = zenoh::open(zenoh::Config::default())
-            .await
-            .map_err(|e| anyhow::anyhow!("zenoh open: {e}"))?;
-        Ok(Self { session })
+        Ok(Self {
+            session: open_session().await?,
+        })
     }
 
     async fn put(&self, key: &str, payload: Vec<u8>) -> anyhow::Result<()> {
@@ -64,10 +86,9 @@ pub struct ZenohSubscriber {
 
 impl ZenohSubscriber {
     pub async fn open() -> anyhow::Result<Self> {
-        let session = zenoh::open(zenoh::Config::default())
-            .await
-            .map_err(|e| anyhow::anyhow!("zenoh open: {e}"))?;
-        Ok(Self { session })
+        Ok(Self {
+            session: open_session().await?,
+        })
     }
 
     pub async fn run_binance_ticks<F>(&self, mut handler: F) -> anyhow::Result<()>

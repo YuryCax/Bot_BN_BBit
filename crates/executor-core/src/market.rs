@@ -22,12 +22,13 @@ struct TickerResult {
 
 #[derive(Debug, Deserialize)]
 struct TickerRow {
+    #[allow(dead_code)]
     symbol: String,
     #[serde(rename = "fundingRate")]
     funding_rate: Option<String>,
 }
 
-/// Max absolute funding rate across symbols (linear perps). Returns 0 if empty/unparseable.
+/// Max absolute funding rate across symbols (linear perps). Polls per-symbol.
 pub async fn fetch_max_abs_funding_rate(
     client: &reqwest::Client,
     symbols: &[String],
@@ -36,17 +37,18 @@ pub async fn fetch_max_abs_funding_rate(
     if symbols.is_empty() {
         return Ok(0.0);
     }
-    let sym = symbols.join(",");
-    let url = format!(
-        "{}/v5/market/tickers?category=linear&symbol={sym}",
-        public_base(testnet)
-    );
-    let resp: TickerResp = client.get(url).send().await?.error_for_status()?.json().await?;
     let mut max_abs = 0.0f64;
-    for row in resp.result.list {
-        if let Some(s) = row.funding_rate {
-            if let Ok(r) = s.parse::<f64>() {
-                max_abs = max_abs.max(r.abs());
+    for sym in symbols {
+        let url = format!(
+            "{}/v5/market/tickers?category=linear&symbol={sym}",
+            public_base(testnet)
+        );
+        let resp: TickerResp = client.get(url).send().await?.error_for_status()?.json().await?;
+        for row in resp.result.list {
+            if let Some(s) = row.funding_rate {
+                if let Ok(r) = s.parse::<f64>() {
+                    max_abs = max_abs.max(r.abs());
+                }
             }
         }
     }

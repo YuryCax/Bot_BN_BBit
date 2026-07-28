@@ -128,6 +128,7 @@ mod tests {
                 start_futures_pairs: vec!["BTCUSDT".into()],
                 max_symbols: 35,
                 edge_profile_path: "config/edge_profile.toml".into(),
+                allow_unverified_paper: false,
             },
             resources: ResourcesConfig {
                 depth_enabled: false,

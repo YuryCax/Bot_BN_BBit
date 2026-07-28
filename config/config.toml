@@ -139,7 +139,7 @@ prometheus_endpoint = "/metrics"
 [control_panel]
 enabled = true
 bind_addr = "127.0.0.1:8080"
-auth_mode = "jwt"
+auth_mode = "none"
 jwt_secret_env = "PANEL_JWT_SECRET"
 default_spot_alloc_pct = 0.05
 default_futures_alloc_pct = 0.05

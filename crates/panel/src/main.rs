@@ -2,9 +2,13 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
+    http::{header, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use shared::config::AppConfig;
 use shared::packet::{OperatorAction, OperatorCommand};
@@ -18,6 +22,8 @@ struct AppState {
     config: Arc<AppConfig>,
     publisher: Arc<ZenohPublisher>,
     halt: Arc<tokio::sync::Mutex<bool>>,
+    jwt_secret: Option<Arc<String>>,
+    last_cmd_ns: Arc<tokio::sync::Mutex<u64>>,
 }
 
 #[derive(Serialize)]
@@ -44,13 +50,71 @@ struct HaltRequest {
     flatten: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
+}
+
+fn jwt_required(cfg: &AppConfig) -> bool {
+    cfg.control_panel
+        .auth_mode
+        .eq_ignore_ascii_case("jwt")
+}
+
+async fn auth_middleware(
+    State(st): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let path = req.uri().path().to_string();
+    if path == "/health" || !jwt_required(&st.config) {
+        return Ok(next.run(req).await);
+    }
+    let Some(secret) = st.jwt_secret.as_ref() else {
+        warn!("auth_mode=jwt but secret env missing");
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let auth = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let token = auth
+        .strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))
+        .unwrap_or("");
+    if token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    // Accept raw shared secret (ops) or HS256 JWT
+    if token == secret.as_str() {
+        return Ok(next.run(req).await);
+    }
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;
+    match decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    ) {
+        Ok(_) => Ok(next.run(req).await),
+        Err(e) => {
+            warn!("jwt reject: {e}");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
 async fn publish_cmd(st: &AppState, action: OperatorAction, source: &str) -> anyhow::Result<()> {
     let cmd = OperatorCommand {
         action,
         ts_ns: utc_now_ns(),
         source: source.into(),
     };
-    st.publisher.publish_command(&cmd).await
+    st.publisher.publish_command(&cmd).await?;
+    *st.last_cmd_ns.lock().await = cmd.ts_ns;
+    Ok(())
 }
 
 async fn dashboard(State(st): State<AppState>) -> Json<Dashboard> {
@@ -131,6 +195,22 @@ async fn enable_phase3() -> Json<serde_json::Value> {
     Json(serde_json::json!({"enabled": true}))
 }
 
+async fn health(State(st): State<AppState>) -> impl IntoResponse {
+    let last_cmd = *st.last_cmd_ns.lock().await;
+    let now = utc_now_ns();
+    let age_ms = if last_cmd == 0 {
+        -1i64
+    } else {
+        ((now.saturating_sub(last_cmd)) / 1_000_000) as i64
+    };
+    Json(serde_json::json!({
+        "status": "ok",
+        "mode": st.config.deployment.mode,
+        "auth_mode": st.config.control_panel.auth_mode,
+        "last_command_age_ms": age_ms,
+    }))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -143,21 +223,46 @@ async fn main() -> anyhow::Result<()> {
     let bind = cfg.control_panel.bind_addr.clone();
     let publisher = Arc::new(ZenohPublisher::open().await?);
 
+    let jwt_secret = if jwt_required(&cfg) {
+        let env_name = &cfg.control_panel.jwt_secret_env;
+        match std::env::var(env_name) {
+            Ok(s) if !s.is_empty() => Some(Arc::new(s)),
+            _ => {
+                anyhow::bail!(
+                    "control_panel.auth_mode=jwt requires env {env_name} (see deploy/secrets.env.example)"
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    let state = AppState {
+        config: Arc::clone(&cfg),
+        publisher,
+        halt: Arc::new(tokio::sync::Mutex::new(false)),
+        jwt_secret,
+        last_cmd_ns: Arc::new(tokio::sync::Mutex::new(0)),
+    };
+
     let app = Router::new()
         .route("/api/v1/suggestions", get(list_suggestions))
         .route("/api/v1/suggestions/:id/apply", post(apply_suggestion))
         .route("/api/v1/phase3/enable", post(enable_phase3))
-        .route("/health", get(|| async { "ok" }))
+        .route("/health", get(health))
         .route("/api/v1/dashboard", get(dashboard))
         .route("/api/v1/trading/halt", post(halt_trading))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState {
-            config: cfg,
-            publisher,
-            halt: Arc::new(tokio::sync::Mutex::new(false)),
-        });
+        .with_state(state);
 
-    info!("control-panel listening on {bind} (Zenoh command bus enabled)");
+    info!(
+        "control-panel listening on {bind} auth_mode={}",
+        cfg.control_panel.auth_mode
+    );
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     axum::serve(listener, app).await?;
     Ok(())

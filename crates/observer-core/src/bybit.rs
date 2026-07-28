@@ -2,7 +2,24 @@ use futures_util::{SinkExt, StreamExt};
 use simd_json::prelude::{ValueAsContainer, ValueAsScalar, ValueObjectAccess};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const BYBIT_WS: &str = "wss://stream.bybit.com/v5/public/linear";
+const BYBIT_WS_MAINNET: &str = "wss://stream.bybit.com/v5/public/linear";
+const BYBIT_WS_TESTNET: &str = "wss://stream-testnet.bybit.com/v5/public/linear";
+
+fn bybit_ws_url() -> String {
+    if let Ok(url) = std::env::var("BYBIT_WS_URL") {
+        if !url.is_empty() {
+            return url;
+        }
+    }
+    let testnet = std::env::var("BYBIT_TESTNET")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if testnet {
+        BYBIT_WS_TESTNET.to_string()
+    } else {
+        BYBIT_WS_MAINNET.to_string()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BybitTick {
@@ -22,9 +39,10 @@ pub async fn stream_bybit_mids(
         .collect();
     let sub = serde_json::json!({ "op": "subscribe", "args": args });
     let sub_text = sub.to_string();
+    let ws_url = bybit_ws_url();
 
     loop {
-        let (ws, _) = connect_async(BYBIT_WS).await?;
+        let (ws, _) = connect_async(&ws_url).await?;
         let (mut write, mut read) = ws.split();
         write.send(Message::Text(sub_text.clone())).await?;
 

@@ -43,6 +43,9 @@ pub struct DeploymentConfig {
     pub start_futures_pairs: Vec<String>,
     pub max_symbols: usize,
     pub edge_profile_path: String,
+    /// Paper-only escape hatch: skip edge pass. Never unlocks live orders.
+    #[serde(default)]
+    pub allow_unverified_paper: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

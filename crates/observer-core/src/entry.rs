@@ -42,9 +42,11 @@ impl EntryEngine {
     ) -> MarketStatePacket {
         let ts_ns = utc_now_ns();
         let z = metrics.welford.z_score(mid) as f32;
-        let vel = crate::math::velocity(mid, metrics.price_100ms_ago(10)) as f32;
+        let vel = crate::math::velocity(mid, metrics.price_at_age_ms(100)) as f32;
         let sigma = metrics.welford.sigma() as f32;
-        let mut d_exp = self.alpha * z.abs() * sigma + self.beta * vel.abs() * self.delta_t;
+        // z-score is unitless; convert price sigma to fraction of mid for fee-comparable d_exp
+        let sigma_frac = if mid > 0.0 { sigma / mid as f32 } else { 0.0 };
+        let mut d_exp = self.alpha * z.abs() * sigma_frac + self.beta * vel.abs() * self.delta_t;
         if vel < 0.0 && d_exp > 0.0 {
             d_exp *= 0.7;
         }
@@ -54,9 +56,10 @@ impl EntryEngine {
         let mut entry_valid = 0u8;
         let mut direction_bias = 0i8;
 
-        let lag_open = lag_residual_bps >= self.lag_min_bps;
+        let lag_open = lag_residual_bps.abs() >= self.lag_min_bps;
         let impulse_ok = impulse_bps.abs() >= self.impulse_min_bps;
-        let edge_ok = d_exp >= d_min && (lag_residual_bps * self.capture_est) >= d_min;
+        let edge_ok =
+            d_exp >= d_min && (lag_residual_bps.abs() * self.capture_est) >= d_min;
 
         if !bybit_stale && trade_hour_ok && lag_open && impulse_ok && edge_ok {
             let z_ok = z.abs() >= self.z_threshold as f32;
