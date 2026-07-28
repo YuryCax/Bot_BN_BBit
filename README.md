@@ -36,9 +36,10 @@ Requires `mode=dev` until real edge pass. Not valid for live go/no-go.
 
 ## Product (Phase 1)
 
-See [`deploy/PRODUCT.md`](deploy/PRODUCT.md).
+See [`deploy/PRODUCT.md`](deploy/PRODUCT.md). Dual-node: [`deploy/DUAL_NODE.md`](deploy/DUAL_NODE.md).
 
 - **Paper never sends live orders** (`mode!=live`).
 - Kill switch: Panel `/api/v1/trading/halt` + Telegram `/pause` → Zenoh → Executor.
-- SL/TP set on open; Stop-Market on live.
-- Edge still `fail` on real hist — do not set `mode=live`.
+- Dynamic SL/TP (trail / fee-BE / partial) + MICRO_OK from Bybit book/trades; long **and** short residual.
+- API tests: testnet only by default — [`deploy/TESTNET_HARNESS.md`](deploy/TESTNET_HARNESS.md).
+- Edge still `fail` on real hist (~−9 bps net) — do not set mainnet `mode=live`.

@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=bot
-EnvironmentFile=/etc/bot/.env
+EnvironmentFile=-/etc/bot/secrets.env
 ExecStart=/opt/bot/bin/telegram-alerts
 Restart=always
 

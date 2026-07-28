@@ -1,10 +1,41 @@
 //! Zenoh IPC — ADR-003 (Tokyo forwarder / Singapore entry)
 
+use std::path::Path;
+
 use postcard::{from_bytes, to_allocvec};
-use tracing::warn;
+use tracing::{info, warn};
 use zenoh::bytes::ZBytes;
+use zenoh::Config;
 
 use crate::packet::{BinanceTick, BybitMidFeed, MarketStatePacket, OperatorCommand};
+
+/// Load Zenoh config: `BOT_ZENOH_CONFIG` path, else `config/zenoh.json5`, else default.
+pub fn load_zenoh_config() -> anyhow::Result<Config> {
+    if let Ok(path) = std::env::var("BOT_ZENOH_CONFIG") {
+        let p = Path::new(&path);
+        if p.exists() {
+            info!("zenoh config from BOT_ZENOH_CONFIG={path}");
+            return Config::from_file(p)
+                .map_err(|e| anyhow::anyhow!("zenoh Config::from_file({path}): {e}"));
+        }
+        return Err(anyhow::anyhow!("BOT_ZENOH_CONFIG set but file missing: {path}"));
+    }
+    let default = Path::new("config/zenoh.json5");
+    if default.exists() {
+        info!("zenoh config from {}", default.display());
+        return Config::from_file(default)
+            .map_err(|e| anyhow::anyhow!("zenoh Config::from_file({}): {e}", default.display()));
+    }
+    info!("zenoh config: default (localhost scouting)");
+    Ok(Config::default())
+}
+
+async fn open_session() -> anyhow::Result<zenoh::Session> {
+    let cfg = load_zenoh_config()?;
+    zenoh::open(cfg)
+        .await
+        .map_err(|e| anyhow::anyhow!("zenoh open: {e}"))
+}
 
 pub struct ZenohPublisher {
     session: zenoh::Session,
@@ -12,10 +43,9 @@ pub struct ZenohPublisher {
 
 impl ZenohPublisher {
     pub async fn open() -> anyhow::Result<Self> {
-        let session = zenoh::open(zenoh::Config::default())
-            .await
-            .map_err(|e| anyhow::anyhow!("zenoh open: {e}"))?;
-        Ok(Self { session })
+        Ok(Self {
+            session: open_session().await?,
+        })
     }
 
     async fn put(&self, key: &str, payload: Vec<u8>) -> anyhow::Result<()> {
@@ -64,10 +94,9 @@ pub struct ZenohSubscriber {
 
 impl ZenohSubscriber {
     pub async fn open() -> anyhow::Result<Self> {
-        let session = zenoh::open(zenoh::Config::default())
-            .await
-            .map_err(|e| anyhow::anyhow!("zenoh open: {e}"))?;
-        Ok(Self { session })
+        Ok(Self {
+            session: open_session().await?,
+        })
     }
 
     pub async fn run_binance_ticks<F>(&self, mut handler: F) -> anyhow::Result<()>
@@ -178,6 +207,33 @@ impl ZenohSubscriber {
                 Ok(cmd) => handler(cmd),
                 Err(e) => warn!("bad OperatorCommand payload: {e}"),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_default_or_repo_zenoh_file() {
+        // Must not panic; file may or may not exist depending on cwd
+        let _ = load_zenoh_config();
+    }
+
+    #[test]
+    fn repo_zenoh_json5_parses() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/zenoh.json5");
+        assert!(path.exists(), "missing {}", path.display());
+        Config::from_file(&path).expect("config/zenoh.json5 must parse");
+    }
+
+    #[test]
+    fn dual_node_zenoh_templates_parse() {
+        for name in ["zenoh-tokyo.json5", "zenoh-singapore.json5"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config").join(name);
+            assert!(path.exists(), "missing {}", path.display());
+            Config::from_file(&path).unwrap_or_else(|e| panic!("{name} parse: {e}"));
         }
     }
 }

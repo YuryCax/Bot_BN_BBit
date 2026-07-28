@@ -1,13 +1,10 @@
-# Documentation
+# Docs index
 
-| Document | Description |
-|----------|-------------|
-| [`../бот на Rust4.md`](../бот%20на%20Rust4.md) | Full technical specification (**v2.4**) |
-| [`adr/003-singapore-entry.md`](adr/003-singapore-entry.md) | **Accepted:** Tokyo forwarder, Singapore entry |
-| [`adr/001-lag-pipeline.md`](adr/001-lag-pipeline.md) | **Superseded** by ADR-003 |
-| [`adr/002-deploy-topology.md`](adr/002-deploy-topology.md) | t3.micro Tokyo + t3.small Singapore |
-| [`../research/README.md`](../research/README.md) | Edge Research + L2 pass rules |
+Canonical technical specification: [`../бот на Rust4.md`](../бот%20на%20Rust4.md) (v2.5).
 
-## Changelog
+ADRs:
+- [`adr/003-singapore-entry.md`](adr/003-singapore-entry.md) — current (thin Observer / fat Executor)
+- [`adr/001-lag-pipeline.md`](adr/001-lag-pipeline.md) — superseded by 003
+- [`adr/002-deploy-topology.md`](adr/002-deploy-topology.md)
 
-Spec changelog is inline in the main document (v2.4 / ADR-003).
+Ops: [`../deploy/PRODUCT.md`](../deploy/PRODUCT.md), [`../deploy/TESTNET_ANALYTICS.md`](../deploy/TESTNET_ANALYTICS.md), [`../deploy/NO_LIVE_UNTIL_PASS.md`](../deploy/NO_LIVE_UNTIL_PASS.md).

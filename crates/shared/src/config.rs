@@ -16,6 +16,45 @@ pub struct AppConfig {
     pub signals: SignalsConfig,
     pub network: NetworkConfig,
     pub control_panel: ControlPanelConfig,
+    /// Funding / basis warm gate (optional; defaults keep previous fail-open funding until polled).
+    #[serde(default)]
+    pub funding_basis: FundingBasisConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FundingBasisConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_max_funding")]
+    pub max_funding_rate: f64,
+    #[serde(default = "default_basis_threshold")]
+    pub basis_threshold_pct: f64,
+    #[serde(default = "default_ticker_poll_sec")]
+    pub ticker_poll_interval_sec: u64,
+}
+
+impl Default for FundingBasisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_funding_rate: 0.0001,
+            basis_threshold_pct: 0.0005,
+            ticker_poll_interval_sec: 60,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_max_funding() -> f64 {
+    0.0001
+}
+fn default_basis_threshold() -> f64 {
+    0.0005
+}
+fn default_ticker_poll_sec() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

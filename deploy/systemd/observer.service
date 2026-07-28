@@ -8,6 +8,10 @@ User=bot
 WorkingDirectory=/opt/bot
 Environment=BOT_CONFIG=/etc/bot/config.toml
 Environment=BOT_SYMBOLS=/etc/bot/symbols.toml
+Environment=BOT_ZENOH_CONFIG=/etc/bot/zenoh.json5
+Environment=BYBIT_TESTNET=1
+Environment=BOT_TESTNET_ANALYTICS=1
+EnvironmentFile=-/etc/bot/secrets.env
 ExecStart=/opt/bot/bin/observer
 Restart=always
 RestartSec=5

@@ -1,5 +1,7 @@
 # Secrets
 .env
+secrets.env
+**/secrets.env
 *.pem
 *.key
 credentials.json
