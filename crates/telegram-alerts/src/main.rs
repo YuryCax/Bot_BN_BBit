@@ -6,11 +6,7 @@ use shared::zenoh_ipc::ZenohPublisher;
 use tracing::{info, warn};
 
 fn parse_command(text: &str) -> Option<OperatorAction> {
-    let command = text
-        .split_whitespace()
-        .next()?
-        .split('@')
-        .next()?;
+    let command = text.split_whitespace().next()?.split('@').next()?;
     match command {
         "/pause" | "/halt" => Some(OperatorAction::HaltEntries),
         "/resume" => Some(OperatorAction::ResumeEntries),

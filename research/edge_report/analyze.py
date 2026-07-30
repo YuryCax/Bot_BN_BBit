@@ -52,7 +52,9 @@ def net_edge_by_hour(events: pd.DataFrame) -> pd.DataFrame:
     return g
 
 
-def build_edge_profile(summary: pd.DataFrame) -> Tuple[str, str, Dict]:
+def build_edge_profile(
+    summary: pd.DataFrame, *, synthetic: bool
+) -> Tuple[str, str, Dict, Dict]:
     meta_status = "fail"
     edge_sections: Dict[str, dict] = {}
     report_lines = ["# Edge Research Summary", ""]
@@ -76,7 +78,7 @@ def build_edge_profile(summary: pd.DataFrame) -> Tuple[str, str, Dict]:
         report_lines.append(f"- follow_through_min: {ft_min:.3f}")
         report_lines.append("")
 
-        if best_net > 0 and len(hours) >= 3:
+        if not synthetic and best_net > 0 and len(hours) >= 3:
             meta_status = "pass"
 
     meta = {
@@ -84,6 +86,8 @@ def build_edge_profile(summary: pd.DataFrame) -> Tuple[str, str, Dict]:
         "research_period_days": 0,
         "injected_latency_ms": INJECTED_LATENCY_MS,
         "status": meta_status,
+        "research_method": "proxy_mid",
+        "data_source": "synthetic" if synthetic else "live",
     }
     return meta_status, "\n".join(report_lines), meta, edge_sections
 
@@ -154,18 +158,20 @@ def main() -> None:
     parser.add_argument("--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT"])
     args = parser.parse_args()
 
+    analysis_dir = args.data_dir
     if args.synthetic:
-        generate_synthetic(args.data_dir, args.symbols)
+        analysis_dir = args.data_dir / "ci_synthetic"
+        generate_synthetic(analysis_dir, args.symbols)
     elif not list(args.data_dir.glob("*.parquet")):
         raise SystemExit(
             f"No parquet in {args.data_dir}. Run collector or pass --synthetic for CI."
         )
 
-    df = load_parquet(args.data_dir)
+    df = load_parquet(analysis_dir)
     days = (df["ts_ms"].max() - df["ts_ms"].min()) / 86_400_000
     events = compute_follow_through(df)
     summary = net_edge_by_hour(events)
-    status, report, meta, edges = build_edge_profile(summary)
+    status, report, meta, edges = build_edge_profile(summary, synthetic=args.synthetic)
     meta["research_period_days"] = max(1, int(days))
 
     args.output_summary.parent.mkdir(parents=True, exist_ok=True)

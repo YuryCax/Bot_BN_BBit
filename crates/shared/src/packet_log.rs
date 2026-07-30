@@ -25,7 +25,8 @@ impl PacketLogWriter {
     }
 
     pub fn append(&mut self, packet: &MarketStatePacket) -> io::Result<()> {
-        let bytes = to_allocvec(packet).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let bytes =
+            to_allocvec(packet).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if bytes.len() > MAX_RECORD_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

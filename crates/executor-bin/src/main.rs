@@ -6,9 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use executor_core::bybit::{
-    extract_order_id, BybitConnector, ExchangePosition, OrderRequest,
-};
+use executor_core::bybit::{extract_order_id, BybitConnector, ExchangePosition, OrderRequest};
 use executor_core::paper_ledger::PaperLedger;
 use executor_core::position::PositionManager;
 use executor_core::risk::{RiskDecision, RiskEngine};
@@ -31,11 +29,9 @@ use shared::validation::validate_startup;
 use shared::zenoh_ipc::ZenohSubscriber;
 use tracing::{info, warn};
 
-fn mid_for_symbol(
-    lags: &Mutex<HashMap<u16, LagState>>,
-    symbol_id: u16,
-    fallback: f64,
-) -> f64 {
+type PendingFollowThrough = Arc<Mutex<Vec<(u16, u64, i8, f64)>>>;
+
+fn mid_for_symbol(lags: &Mutex<HashMap<u16, LagState>>, symbol_id: u16, fallback: f64) -> f64 {
     lags.lock()
         .unwrap()
         .get(&symbol_id)
@@ -74,6 +70,7 @@ async fn cancel_exchange_stop(api: &BybitConnector, symbol: &str, stop_id: &Opti
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_runtime_status(
     path: &str,
     mode: &str,
@@ -146,12 +143,9 @@ fn seed_positions_from_exchange(
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let config_path =
-        std::env::var("BOT_CONFIG").unwrap_or_else(|_| "config/config.toml".into());
+    let config_path = std::env::var("BOT_CONFIG").unwrap_or_else(|_| "config/config.toml".into());
     let symbols_path =
         std::env::var("BOT_SYMBOLS").unwrap_or_else(|_| "config/symbols.toml".into());
 
@@ -159,10 +153,7 @@ async fn main() -> anyhow::Result<()> {
     let symbols = SymbolsFile::load(&symbols_path).context("load symbols")?;
     let edge = EdgeProfile::load(&cfg.deployment.edge_profile_path).context("load edge")?;
 
-    let need_edge = requires_edge_gate(
-        &cfg.deployment.mode,
-        cfg.deployment.allow_unverified_paper,
-    );
+    let need_edge = requires_edge_gate(&cfg.deployment.mode, cfg.deployment.allow_unverified_paper);
     validate_startup(&cfg, &symbols, &edge, need_edge).context("startup validation")?;
     if !need_edge {
         warn!(
@@ -197,8 +188,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.risk.atr_min_filter,
     ));
 
-    let metrics: Arc<Mutex<HashMap<u16, SymbolMetrics>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let metrics: Arc<Mutex<HashMap<u16, SymbolMetrics>>> = Arc::new(Mutex::new(HashMap::new()));
     let lags: Arc<Mutex<HashMap<u16, LagState>>> = Arc::new(Mutex::new(HashMap::new()));
     let follow_through: Arc<Mutex<HashMap<u16, FollowThroughTracker>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -206,7 +196,10 @@ async fn main() -> anyhow::Result<()> {
 
     for s in &symbols.symbol {
         if s.enabled {
-            metrics.lock().unwrap().insert(s.id, SymbolMetrics::default());
+            metrics
+                .lock()
+                .unwrap()
+                .insert(s.id, SymbolMetrics::default());
             lags.lock().unwrap().insert(
                 s.id,
                 LagState {
@@ -362,16 +355,16 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let warm_funding = Arc::clone(&warm);
-    let funding_testnet = bybit_api
-        .as_ref()
-        .map(|a| a.testnet)
-        .unwrap_or(true);
+    let funding_testnet = bybit_api.as_ref().map(|a| a.testnet).unwrap_or(true);
     tokio::spawn(async move {
         let mut iv = tokio::time::interval(Duration::from_secs(60));
         loop {
             iv.tick().await;
-            match executor_core::market::poll_max_abs_funding_rate(&funding_symbols, funding_testnet)
-                .await
+            match executor_core::market::poll_max_abs_funding_rate(
+                &funding_symbols,
+                funding_testnet,
+            )
+            .await
             {
                 Ok(rate) => {
                     let mut w = warm_funding.lock().unwrap();
@@ -420,11 +413,10 @@ async fn main() -> anyhow::Result<()> {
         risk.max_adverse_move_bps
     );
 
-    let heartbeat_timeout =
-        Duration::from_millis(cfg.network.heartbeat_timeout_ms.max(500));
+    let heartbeat_timeout = Duration::from_millis(cfg.network.heartbeat_timeout_ms.max(500));
     let mut last_hb = Instant::now();
     let mut last_hb_ts_ns: u64 = 0;
-    let pending_ft: Arc<Mutex<Vec<(u16, u64, i8, f64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let pending_ft: PendingFollowThrough = Arc::new(Mutex::new(Vec::new()));
     let edge = Arc::new(edge);
     let mut operator_halt = false;
     let mut flatten_request = false;

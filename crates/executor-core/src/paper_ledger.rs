@@ -58,6 +58,7 @@ impl PaperLedger {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_exit(
         &mut self,
         symbol: &str,
@@ -104,10 +105,7 @@ impl PaperLedger {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut f = OpenOptions::new().create(true).append(true).open(path)?;
         if let Some(last) = self.fills.last() {
             writeln!(f, "{}", serde_json::to_string(last).unwrap_or_default())?;
         }

@@ -33,10 +33,7 @@ pub async fn stream_bybit_mids(
     symbols: &[String],
     mut on_tick: impl FnMut(BybitTick) + Send + 'static,
 ) -> anyhow::Result<()> {
-    let args: Vec<String> = symbols
-        .iter()
-        .map(|s| format!("orderbook.1.{s}"))
-        .collect();
+    let args: Vec<String> = symbols.iter().map(|s| format!("orderbook.1.{s}")).collect();
     let sub = serde_json::json!({ "op": "subscribe", "args": args });
     let sub_text = sub.to_string();
     let ws_url = bybit_ws_url();
@@ -50,7 +47,8 @@ pub async fn stream_bybit_mids(
             let msg = msg?;
             if let Message::Text(text) = msg {
                 let mut buf = text;
-                let Ok(v) = (unsafe { simd_json::from_str::<simd_json::OwnedValue>(&mut buf) }) else {
+                let Ok(v) = (unsafe { simd_json::from_str::<simd_json::OwnedValue>(&mut buf) })
+                else {
                     continue;
                 };
                 let topic = v.get("topic").and_then(|x| x.as_str()).unwrap_or("");

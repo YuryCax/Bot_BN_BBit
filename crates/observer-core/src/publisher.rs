@@ -1,5 +1,5 @@
-use shared::packet::MarketStatePacket;
 use postcard::to_allocvec;
+use shared::packet::MarketStatePacket;
 
 pub fn encode_packet(packet: &MarketStatePacket) -> anyhow::Result<Vec<u8>> {
     Ok(to_allocvec(packet)?)

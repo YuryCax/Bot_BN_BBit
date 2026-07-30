@@ -57,9 +57,7 @@ struct Claims {
 }
 
 fn jwt_required(cfg: &AppConfig) -> bool {
-    cfg.control_panel
-        .auth_mode
-        .eq_ignore_ascii_case("jwt")
+    cfg.control_panel.auth_mode.eq_ignore_ascii_case("jwt")
 }
 
 async fn auth_middleware(
@@ -213,12 +211,9 @@ async fn health(State(st): State<AppState>) -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let config_path =
-        std::env::var("BOT_CONFIG").unwrap_or_else(|_| "config/config.toml".into());
+    let config_path = std::env::var("BOT_CONFIG").unwrap_or_else(|_| "config/config.toml".into());
     let cfg = Arc::new(AppConfig::load(&config_path)?);
     let bind = cfg.control_panel.bind_addr.clone();
     let publisher = Arc::new(ZenohPublisher::open().await?);

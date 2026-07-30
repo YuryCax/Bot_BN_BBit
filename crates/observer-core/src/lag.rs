@@ -45,8 +45,7 @@ impl LagState {
         if self.binance_mid_100ms_ago <= 0.0 {
             return 0.0;
         }
-        ((binance_mid - self.binance_mid_100ms_ago) / self.binance_mid_100ms_ago * 10_000.0)
-            as f32
+        ((binance_mid - self.binance_mid_100ms_ago) / self.binance_mid_100ms_ago * 10_000.0) as f32
     }
 
     /// Signed residual: impulse not yet reflected in Bybit mid (negative on downside lag).

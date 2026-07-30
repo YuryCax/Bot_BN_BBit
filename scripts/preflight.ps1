@@ -17,10 +17,10 @@ Write-Host "== config/edge gate =="
 python -c @"
 import tomllib
 from pathlib import Path
-cfg = tomllib.loads(Path('config/config.toml').read_bytes())
+cfg = tomllib.loads(Path('config/config.toml').read_text(encoding='utf-8'))
 mode = cfg['deployment']['mode'].lower()
 assert mode in ('dev', 'paper', 'live'), mode
-edge = tomllib.loads(Path(cfg['deployment']['edge_profile_path']).read_bytes())
+edge = tomllib.loads(Path(cfg['deployment']['edge_profile_path']).read_text(encoding='utf-8'))
 meta = edge['meta']
 print(f\"mode={mode} edge_status={meta.get('status')} data_source={meta.get('data_source')} days={meta.get('research_period_days')}\")
 if mode in ('paper', 'live'):

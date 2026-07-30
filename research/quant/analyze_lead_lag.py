@@ -32,7 +32,8 @@ FEE_BUFFER_BPS = 3.0  # config fee_profit_buffer_pct ≈ 0.0003
 DEFAULT_FEE_BPS = FEE_BYBIT_RT_BPS
 
 INJECTED_LATENCY_MS = 150
-IMPULSE_MIN_BPS = 5.0
+IMPULSE_MIN_BPS = 12.0
+LAG_MIN_BPS = 32.0
 DEFAULT_NOTIONALS = (1000.0, 3000.0)
 FORWARD_HORIZONS_MS = (150, 300, 500, 1000)
 
@@ -98,6 +99,7 @@ def impulse_events_bar(
     symbol: str,
     bar_ms: int = 100,
     impulse_min_bps: float = IMPULSE_MIN_BPS,
+    lag_min_bps: float = LAG_MIN_BPS,
     latency_ms: int = INJECTED_LATENCY_MS,
     forward_ms: Optional[int] = None,
 ) -> pd.DataFrame:
@@ -118,11 +120,17 @@ def impulse_events_bar(
     joined = joined.sort_index()
     joined["bn_prev"] = joined["bn"].shift(1)
     joined["impulse_bps"] = (joined["bn"] - joined["bn_prev"]) / joined["bn_prev"] * 10_000
+    joined["by_move_bps"] = (joined["by"] - joined["bn_prev"]) / joined["bn_prev"] * 10_000
+    joined["lag_residual_bps"] = joined["impulse_bps"] - joined["by_move_bps"]
     lag_bars = max(1, int(np.ceil(fwd / bar_ms)))
     joined["by_fwd"] = joined["by"].shift(-lag_bars)
     joined["fwd_bps"] = (joined["by_fwd"] - joined["by"]) / joined["by"] * 10_000
     joined["hour_utc"] = ((joined.index // 3_600_000) % 24).astype(int)
-    events = joined[joined["impulse_bps"].abs() >= impulse_min_bps].dropna().copy()
+    events = joined[
+        (joined["impulse_bps"].abs() >= impulse_min_bps)
+        & (joined["lag_residual_bps"].abs() >= lag_min_bps)
+        & (joined["impulse_bps"] * joined["lag_residual_bps"] > 0)
+    ].dropna().copy()
     if events.empty:
         return pd.DataFrame()
     events["direction"] = np.sign(events["impulse_bps"])
@@ -138,8 +146,10 @@ def impulse_events_event_time(
     trades: pd.DataFrame,
     symbol: str,
     impulse_min_bps: float = IMPULSE_MIN_BPS,
+    lag_min_bps: float = LAG_MIN_BPS,
     latency_ms: int = INJECTED_LATENCY_MS,
     detect_bar_ms: int = 100,
+    max_staleness_ms: int = 200,
     max_events: int = 50_000,
 ) -> pd.DataFrame:
     """Event-time: Binance impulse on detect_bar, Bybit mids via asof at t and t+latency."""
@@ -160,14 +170,16 @@ def impulse_events_event_time(
         impulses = impulses.sample(n=max_events, random_state=42).sort_values("ts_ms")
 
     by_sorted = by.sort_values("ts_ms")
-    left = impulses[["ts_ms", "impulse_bps", "bn"]].sort_values("ts_ms")
+    left = impulses[["ts_ms", "impulse_bps", "bn", "bn_prev"]].sort_values("ts_ms")
     left["direction"] = np.sign(left["impulse_bps"])
 
     at_t = pd.merge_asof(
         left,
-        by_sorted.rename(columns={"mid": "by_t"}),
-        on="ts_ms",
+        by_sorted.rename(columns={"mid": "by_t", "ts_ms": "by_ts_t"}),
+        left_on="ts_ms",
+        right_on="by_ts_t",
         direction="backward",
+        tolerance=max_staleness_ms,
     )
     fwd_key = at_t[["ts_ms"]].copy()
     fwd_key["ts_query"] = at_t["ts_ms"] + int(latency_ms)
@@ -177,9 +189,18 @@ def impulse_events_event_time(
         left_on="ts_query",
         right_on="by_ts",
         direction="forward",
+        tolerance=max_staleness_ms,
     )
     out = at_t.merge(at_fwd[["ts_ms", "by_fwd"]], on="ts_ms", how="inner")
     out = out.dropna(subset=["by_t", "by_fwd"])
+    if out.empty:
+        return pd.DataFrame()
+    out["by_move_bps"] = (out["by_t"] - out["bn_prev"]) / out["bn_prev"] * 10_000
+    out["lag_residual_bps"] = out["impulse_bps"] - out["by_move_bps"]
+    out = out[
+        (out["lag_residual_bps"].abs() >= lag_min_bps)
+        & (out["impulse_bps"] * out["lag_residual_bps"] > 0)
+    ].copy()
     if out.empty:
         return pd.DataFrame()
     out["fwd_bps"] = (out["by_fwd"] - out["by_t"]) / out["by_t"] * 10_000
@@ -221,6 +242,8 @@ def edge_with_slippage(
 
 def summarize_symbol(
     events: pd.DataFrame,
+    lag_min_bps: float,
+    max_adverse_move_bps: float,
 ) -> Tuple[Dict, List[int], float, float, float]:
     if events.empty:
         return {}, [], 0.0, 0.0, 0.0
@@ -244,11 +267,11 @@ def summarize_symbol(
     cfg = {
         "net_edge_bps": round(best_net, 2),
         "follow_through_min": round(max(0.35, min(ft_min, 0.55)), 3),
-        "lag_min_bps": 3.0,
+        "lag_min_bps": lag_min_bps,
         "trade_hours_utc": hours,
         "vol_regime_min_atr_pct": 0.0025,
         "max_slippage_bps": round(float(events["slippage_bps"].quantile(0.95)), 2),
-        "max_adverse_move_bps": 15.0,
+        "max_adverse_move_bps": max_adverse_move_bps,
     }
     return cfg, hours, best_net, float(events["slippage_bps"].median()), best_gross
 
@@ -360,6 +383,9 @@ def main() -> None:
         help="Impulse measurement: event-time asof (default), bar-join, or both",
     )
     parser.add_argument("--impulse-min-bps", type=float, default=IMPULSE_MIN_BPS)
+    parser.add_argument("--lag-min-bps", type=float, default=LAG_MIN_BPS)
+    parser.add_argument("--max-adverse-move-bps", type=float, default=12.0)
+    parser.add_argument("--max-staleness-ms", type=int, default=200)
     parser.add_argument("--latency-ms", type=int, default=INJECTED_LATENCY_MS)
     parser.add_argument("--bar-ms", type=int, default=100)
     parser.add_argument("--fee-bps", type=float, default=DEFAULT_FEE_BPS)
@@ -378,6 +404,8 @@ def main() -> None:
         f"- fee_buffer_bps: {FEE_BUFFER_BPS}",
         f"- method: {args.method}",
         f"- impulse_min_bps: {args.impulse_min_bps}",
+        f"- lag_min_bps: {args.lag_min_bps}",
+        f"- max_staleness_ms: {args.max_staleness_ms}",
         f"- latency_ms: {args.latency_ms}",
         f"- bar_ms: {args.bar_ms}",
         "",
@@ -434,6 +462,7 @@ def main() -> None:
                     sym,
                     bar_ms=args.bar_ms,
                     impulse_min_bps=args.impulse_min_bps,
+                    lag_min_bps=args.lag_min_bps,
                     latency_ms=args.latency_ms,
                 )
             else:
@@ -441,13 +470,19 @@ def main() -> None:
                     trades,
                     sym,
                     impulse_min_bps=args.impulse_min_bps,
+                    lag_min_bps=args.lag_min_bps,
                     latency_ms=args.latency_ms,
                     detect_bar_ms=args.bar_ms,
+                    max_staleness_ms=args.max_staleness_ms,
                 )
             events = edge_with_slippage(
                 events, sim, sym, args.notional_usd, fee_bps=args.fee_bps
             )
-            cfg, hours, best_net, med_slip, best_gross = summarize_symbol(events)
+            cfg, hours, best_net, med_slip, best_gross = summarize_symbol(
+                events,
+                lag_min_bps=args.lag_min_bps,
+                max_adverse_move_bps=args.max_adverse_move_bps,
+            )
             if not cfg:
                 report_lines.append(f"## {sym} ({m})\n- no impulse events\n")
                 continue

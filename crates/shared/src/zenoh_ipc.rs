@@ -14,7 +14,10 @@ pub fn load_zenoh_config() -> anyhow::Result<zenoh::Config> {
             .map_err(|e| anyhow::anyhow!("zenoh Config::from_file({path}): {e}"));
     }
     if std::env::var(zenoh::Config::DEFAULT_CONFIG_PATH_ENV).is_ok() {
-        info!("zenoh config from {}", zenoh::Config::DEFAULT_CONFIG_PATH_ENV);
+        info!(
+            "zenoh config from {}",
+            zenoh::Config::DEFAULT_CONFIG_PATH_ENV
+        );
         return zenoh::Config::from_env()
             .map_err(|e| anyhow::anyhow!("zenoh Config::from_env: {e}"));
     }
@@ -71,7 +74,7 @@ impl ZenohPublisher {
 
     pub async fn publish_heartbeat(&self, ts_ns: u64) -> anyhow::Result<()> {
         let key = "system/heartbeat/tokyo";
-        self.put(&key, ts_ns.to_le_bytes().to_vec()).await
+        self.put(key, ts_ns.to_le_bytes().to_vec()).await
     }
 
     pub async fn publish_command(&self, cmd: &OperatorCommand) -> anyhow::Result<()> {

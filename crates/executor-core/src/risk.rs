@@ -137,8 +137,7 @@ impl RiskEngine {
         } else {
             packet.ref_price
         };
-        let move_bps =
-            Self::adverse_move_bps(packet.ref_price, bybit, packet.direction_bias);
+        let move_bps = Self::adverse_move_bps(packet.ref_price, bybit, packet.direction_bias);
         if move_bps > self.max_adverse_move_bps {
             return RiskDecision::AdverseMoveExceeded;
         }

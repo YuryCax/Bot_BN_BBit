@@ -43,7 +43,13 @@ pub async fn fetch_max_abs_funding_rate(
             "{}/v5/market/tickers?category=linear&symbol={sym}",
             public_base(testnet)
         );
-        let resp: TickerResp = client.get(url).send().await?.error_for_status()?.json().await?;
+        let resp: TickerResp = client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         for row in resp.result.list {
             if let Some(s) = row.funding_rate {
                 if let Ok(r) = s.parse::<f64>() {

@@ -36,8 +36,7 @@ impl PositionManager {
         if pos.entry_impulse_bps.abs() < 1e-6 {
             return;
         }
-        let residual_ratio =
-            packet.lag_residual_bps.abs() / pos.entry_impulse_bps.abs();
+        let residual_ratio = packet.lag_residual_bps.abs() / pos.entry_impulse_bps.abs();
         pos.lag_capture_ratio = 1.0 - residual_ratio.clamp(0.0, 1.0);
     }
 

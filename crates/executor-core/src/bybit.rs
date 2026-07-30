@@ -127,11 +127,12 @@ impl BybitConnector {
         if let Some(trig) = req.trigger_price {
             body["orderType"] = serde_json::json!("Market");
             body["triggerPrice"] = serde_json::json!(format!("{trig:.2}"));
-            body["triggerDirection"] = serde_json::json!(if req.side.eq_ignore_ascii_case("Sell") {
-                2
-            } else {
-                1
-            });
+            body["triggerDirection"] =
+                serde_json::json!(if req.side.eq_ignore_ascii_case("Sell") {
+                    2
+                } else {
+                    1
+                });
             body["triggerBy"] = serde_json::json!("LastPrice");
             body["timeInForce"] = serde_json::json!("GTC");
         } else {
@@ -346,10 +347,7 @@ pub fn parse_order_fill(body: &str) -> Option<OrderFill> {
                 .and_then(|s| s.parse().ok())
         })
         .filter(|q| *q > 0.0 && q.is_finite())?;
-    let status = r
-        .get("orderStatus")
-        .and_then(|x| x.as_str())
-        .unwrap_or("");
+    let status = r.get("orderStatus").and_then(|x| x.as_str()).unwrap_or("");
     let fully = status.eq_ignore_ascii_case("Filled")
         || (status.eq_ignore_ascii_case("PartiallyFilledCanceled") && cum > 0.0);
     Some(OrderFill {
@@ -411,9 +409,7 @@ impl BybitConnector {
         symbol: &str,
         order_id: &str,
     ) -> anyhow::Result<Option<OrderFill>> {
-        let path = format!(
-            "/v5/order/realtime?category=linear&symbol={symbol}&orderId={order_id}"
-        );
+        let path = format!("/v5/order/realtime?category=linear&symbol={symbol}&orderId={order_id}");
         let text = self.signed_get(&path).await?;
         let v: serde_json::Value = serde_json::from_str(&text)?;
         let row = v["result"]["list"]

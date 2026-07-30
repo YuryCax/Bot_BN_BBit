@@ -65,16 +65,11 @@ impl EntryEngine {
         let mut direction_bias = 0i8;
 
         // residual_bps → price fraction × capture ≥ round-trip fee floor
-        let expected_capture =
-            (lag_residual_bps.abs() as f64 / 10_000.0) * self.capture_est as f64;
+        let expected_capture = (lag_residual_bps.abs() as f64 / 10_000.0) * self.capture_est as f64;
         let lag_open = lag_residual_bps.abs() >= self.lag_min_bps;
         let impulse_ok = impulse_bps.abs() >= self.impulse_min_bps;
         let edge_ok = d_exp as f64 >= self.d_min_net && expected_capture >= self.d_min_net;
-        let atr_frac = if mid > 0.0 {
-            metrics.atr / mid
-        } else {
-            0.0
-        };
+        let atr_frac = if mid > 0.0 { metrics.atr / mid } else { 0.0 };
         let atr_ok = self.atr_min_frac <= 0.0 || atr_frac >= self.atr_min_frac;
 
         if !bybit_stale && trade_hour_ok && lag_open && impulse_ok && edge_ok && atr_ok {

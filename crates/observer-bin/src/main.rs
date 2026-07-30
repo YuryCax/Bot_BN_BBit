@@ -17,12 +17,9 @@ use tracing::{info, warn};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let config_path =
-        std::env::var("BOT_CONFIG").unwrap_or_else(|_| "config/config.toml".into());
+    let config_path = std::env::var("BOT_CONFIG").unwrap_or_else(|_| "config/config.toml".into());
     let symbols_path =
         std::env::var("BOT_SYMBOLS").unwrap_or_else(|_| "config/symbols.toml".into());
 
@@ -39,8 +36,7 @@ async fn main() -> anyhow::Result<()> {
         "paper" => !cfg.deployment.allow_unverified_paper,
         _ => false,
     };
-    validate_startup(&cfg, &symbols, &edge, need_edge)
-        .context("startup validation")?;
+    validate_startup(&cfg, &symbols, &edge, need_edge).context("startup validation")?;
     if !need_edge {
         warn!(
             "observer mode={} — edge gate skipped (paper_or_live={paper_or_live})",

@@ -7,12 +7,11 @@ use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let api = BybitConnector::from_env()
-        .ok_or_else(|| anyhow::anyhow!("set BYBIT_API_KEY and BYBIT_API_SECRET (see secrets.env.example)"))?;
+    let api = BybitConnector::from_env().ok_or_else(|| {
+        anyhow::anyhow!("set BYBIT_API_KEY and BYBIT_API_SECRET (see secrets.env.example)")
+    })?;
 
     if !api.testnet {
         let allow = std::env::var("BOT_ALLOW_MAINNET_SMOKE")
@@ -63,7 +62,10 @@ async fn main() -> anyhow::Result<()> {
 
     let positions = api.fetch_open_positions().await?;
     let ours = positions.iter().find(|p| p.symbol == symbol);
-    info!("positions after open: {:?}", ours.map(|p| (p.size, p.avg_price)));
+    info!(
+        "positions after open: {:?}",
+        ours.map(|p| (p.size, p.avg_price))
+    );
 
     // Close reduce-only
     let close_qty = fill.cum_qty.max(qty);
@@ -72,10 +74,7 @@ async fn main() -> anyhow::Result<()> {
     info!("close: {cbody}");
     if let Some(cid) = extract_order_id(&cbody) {
         match api.await_order_fill(&symbol, &cid, 50).await {
-            Ok(cf) => info!(
-                "close fill avg={:.4} qty={:.6}",
-                cf.avg_price, cf.cum_qty
-            ),
+            Ok(cf) => info!("close fill avg={:.4} qty={:.6}", cf.avg_price, cf.cum_qty),
             Err(e) => warn!("close fill poll: {e}"),
         }
     }

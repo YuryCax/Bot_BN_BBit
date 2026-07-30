@@ -32,4 +32,8 @@ jobs:
       - name: install deps
         run: pip install -r research/collector/requirements.txt
       - name: edge analysis synthetic
-        run: python research/edge_report/analyze.py --synthetic
+        run: >-
+          python research/edge_report/analyze.py --synthetic
+          --data-dir "$RUNNER_TEMP/edge-data"
+          --output-profile "$RUNNER_TEMP/edge-profile.toml"
+          --output-summary "$RUNNER_TEMP/edge-summary.md"

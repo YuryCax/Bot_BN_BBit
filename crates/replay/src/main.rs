@@ -92,7 +92,11 @@ fn write_fixture(path: &str, n: usize) -> anyhow::Result<()> {
     let mut w = PacketLogWriter::open(path)?;
     let now = utc_now_ns();
     for i in 0..n {
-        let mut p = MarketStatePacket::neutral(1 + (i % 2) as u16, now + i as u64 * 100_000_000, i as u32 + 1);
+        let mut p = MarketStatePacket::neutral(
+            1 + (i % 2) as u16,
+            now + i as u64 * 100_000_000,
+            i as u32 + 1,
+        );
         // ~55% winners after latency to pass FT≥40% and PF≥1.2 with enough trades
         let win = i % 5 != 0;
         p.entry_valid = 1;
@@ -184,6 +188,11 @@ mod tests {
             engine.on_packet(&p, estimate_pnl(&p, 150));
         }
         assert!(engine.stats.trades >= 20);
-        assert!(engine.passes_gate(), "pf={} ft={}", engine.stats.profit_factor(), engine.stats.follow_through_rate());
+        assert!(
+            engine.passes_gate(),
+            "pf={} ft={}",
+            engine.stats.profit_factor(),
+            engine.stats.follow_through_rate()
+        );
     }
 }
