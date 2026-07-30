@@ -1,5 +1,19 @@
 # AWS quickstart — Tokyo (observer) + Singapore (executor)
 
+> ## BLOCKER: Linux binaries required
+>
+> `scripts/package_release.ps1` on Windows packages **Windows `.exe`** binaries.
+> They will **NOT run on Ubuntu** — `install.sh` only renames them, it cannot convert them.
+> Before any AWS deploy, produce `x86_64-unknown-linux-gnu` binaries one of two ways:
+>
+> 1. **Build on the server** (simplest): install rustup on the AWS host, clone the repo,
+>    `cargo build --release --workspace`, copy binaries to `/opt/bot/bin/`.
+>    t3.micro is slow — build on the Singapore t3.small (or a temporary larger instance) and copy to Tokyo.
+> 2. **Cross-build from this machine** via WSL2 or Docker (Ubuntu container, same cargo command),
+>    then run `package_release.ps1` pointing at the Linux `target/release`.
+>
+> `package_release.ps1` refuses to pack `.exe` unless you pass `-AllowWindowsBinaries` (debug only).
+
 Goal: put keys in gitignored files, smoke APIs, then deploy the same release to two regions and monetize only after gates.
 
 ## 0. Local secrets (Windows)

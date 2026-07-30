@@ -2,7 +2,9 @@
 # Output: dist/bot-release-<utc>.tar.gz
 
 param(
-    [string]$OutDir = "dist"
+    [string]$OutDir = "dist",
+    # Debug escape hatch only: Windows .exe binaries will NOT run on Ubuntu.
+    [switch]$AllowWindowsBinaries
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,14 +28,27 @@ $exeDir = if ($env:CARGO_TARGET_DIR) {
 }
 
 $names = @("observer", "executor", "control-panel", "telegram-alerts", "replay", "smoke-bybit")
+$packedWindows = $false
 foreach ($n in $names) {
-    $src = Join-Path $exeDir "$n.exe"
-    if (-not (Test-Path $src)) { $src = Join-Path $exeDir $n }
+    # Prefer Linux binaries (no extension) — the deploy target is Ubuntu.
+    $src = Join-Path $exeDir $n
+    if (-not (Test-Path $src)) { $src = Join-Path $exeDir "$n.exe" }
     if (-not (Test-Path $src)) {
         Write-Warning "skip missing $n"
         continue
     }
+    if ($src.EndsWith(".exe")) { $packedWindows = $true }
     Copy-Item $src (Join-Path $binDir (Split-Path $src -Leaf))
+}
+
+if ($packedWindows) {
+    Write-Warning "BLOCKER: Windows .exe binaries were packaged. They will NOT run on Ubuntu."
+    Write-Warning "Build Linux binaries first (WSL2/Docker cross-build or build on the AWS host)."
+    Write-Warning "See the BLOCKER section in deploy/AWS_QUICKSTART.md."
+    if (-not $AllowWindowsBinaries) {
+        Write-Error "Refusing to create an AWS-unusable archive. Re-run with -AllowWindowsBinaries to override (debug only)."
+    }
+    Write-Warning "Continuing because -AllowWindowsBinaries was set (archive is for debug only)."
 }
 
 Copy-Item (Join-Path $root "config\*.toml") $cfgDir

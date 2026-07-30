@@ -34,5 +34,6 @@ else:
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (Test-Path "secrets.env") { Write-Host "secrets.env present" } else { Write-Host "WARN: no secrets.env" }
+Write-Host "NOTE: Linux binaries required for AWS - see the BLOCKER section in deploy/AWS_QUICKSTART.md"
 Write-Host "PREFLIGHT_OK"
 exit 0
